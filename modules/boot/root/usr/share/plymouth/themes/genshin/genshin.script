@@ -1,0 +1,159 @@
+# Genshin Impact - Plymouth loading screen
+# حلقه‌ی چرخان + ستاره‌ی Celestia + هفت آیکون عنصر که با پیشرفت بوت روشن می‌شن
+
+Window.SetBackgroundTopColor(0.04, 0.06, 0.12);
+Window.SetBackgroundBottomColor(0.02, 0.03, 0.07);
+
+global.sw = Window.GetWidth();
+global.sh = Window.GetHeight();
+global.k = global.sh / 1080;
+
+fun load_scaled(name) {
+    img = Image(name);
+    return img.Scale(Math.Int(img.GetWidth() * global.k) + 1, Math.Int(img.GetHeight() * global.k) + 1);
+}
+
+# ───────────── پس‌زمینه (cover) + وینیت ─────────────
+bg_img = Image("bg.png");
+bs = Math.Max(global.sw / bg_img.GetWidth(), global.sh / bg_img.GetHeight());
+bg_img = bg_img.Scale(Math.Int(bg_img.GetWidth() * bs) + 1, Math.Int(bg_img.GetHeight() * bs) + 1);
+bg_sprite = Sprite(bg_img);
+bg_sprite.SetX((global.sw - bg_img.GetWidth()) / 2);
+bg_sprite.SetY((global.sh - bg_img.GetHeight()) / 2);
+bg_sprite.SetZ(-100);
+
+vg_img = Image("vignette.png");
+vg_img = vg_img.Scale(global.sw, global.sh);
+vg_sprite = Sprite(vg_img);
+vg_sprite.SetX(0);
+vg_sprite.SetY(0);
+vg_sprite.SetZ(-90);
+
+# ───────────── نشان مرکزی ─────────────
+global.cx = global.sw / 2;
+global.cy = global.sh * 0.40;
+
+global.star_img = load_scaled("star.png");
+global.star_sprite = Sprite(global.star_img);
+global.star_sprite.SetX(global.cx - global.star_img.GetWidth() / 2);
+global.star_sprite.SetY(global.cy - global.star_img.GetHeight() / 2);
+global.star_sprite.SetZ(10);
+
+global.ring_img = load_scaled("ring.png");
+global.ring_sprite = Sprite(global.ring_img);
+global.ring_sprite.SetX(global.cx - global.ring_img.GetWidth() / 2);
+global.ring_sprite.SetY(global.cy - global.ring_img.GetHeight() / 2);
+global.ring_sprite.SetZ(11);
+
+title_img = load_scaled("title.png");
+title_sprite = Sprite(title_img);
+title_sprite.SetX(global.cx - title_img.GetWidth() / 2);
+title_sprite.SetY(global.cy + 235 * global.k);
+title_sprite.SetZ(10);
+
+# ───────────── هفت آیکون عنصر ─────────────
+names[0] = "pyro";
+names[1] = "hydro";
+names[2] = "anemo";
+names[3] = "electro";
+names[4] = "dendro";
+names[5] = "cryo";
+names[6] = "geo";
+
+icon_y = global.sh * 0.86;
+gap = 112 * global.k;
+
+for (i = 0; i < 7; i++) {
+    dim_img = load_scaled("dim_" + names[i] + ".png");
+    lit_img = load_scaled("lit_" + names[i] + ".png");
+    ix = global.cx + (i - 3) * gap - dim_img.GetWidth() / 2;
+    iy = icon_y - dim_img.GetHeight() / 2;
+    global.dim[i] = Sprite(dim_img);
+    global.dim[i].SetX(ix);
+    global.dim[i].SetY(iy);
+    global.dim[i].SetZ(5);
+    global.lit[i] = Sprite(lit_img);
+    global.lit[i].SetX(ix);
+    global.lit[i].SetY(iy);
+    global.lit[i].SetZ(6);
+    global.lit[i].SetOpacity(0);
+}
+
+bar_img = load_scaled("bar.png");
+bar_sprite = Sprite(bar_img);
+bar_sprite.SetX(global.cx - bar_img.GetWidth() / 2);
+bar_sprite.SetY(icon_y + 62 * global.k);
+bar_sprite.SetZ(4);
+
+# ───────────── پیشرفت و انیمیشن ─────────────
+global.t = 0;
+global.cb = 0;
+global.cur = 0;
+
+fun boot_progress_cb(duration, progress) {
+    global.cb = progress;
+}
+Plymouth.SetBootProgressFunction(boot_progress_cb);
+
+fun refresh_cb() {
+    global.t = global.t + 0.02;
+
+    # پیشرفت زمانی نرم تا اگه بوت سریع یا بی‌اطلاع بود، آیکون‌ها بازم پر بشن
+    tp = 0.92 * global.t / (global.t + 5);
+    tgt = Math.Max(global.cb, tp);
+    global.cur = global.cur + (tgt - global.cur) * 0.06;
+
+    for (i = 0; i < 7; i++) {
+        v = global.cur * 7 - i;
+        if (v < 0) v = 0;
+        if (v > 1) v = 1;
+        global.lit[i].SetOpacity(v);
+    }
+
+    # چرخش حلقه و ضربان ستاره
+    r = global.ring_img.Rotate(global.t * 0.45);
+    global.ring_sprite.SetImage(r);
+    global.ring_sprite.SetX(global.cx - r.GetWidth() / 2);
+    global.ring_sprite.SetY(global.cy - r.GetHeight() / 2);
+    global.star_sprite.SetOpacity(0.86 + 0.14 * Math.Sin(global.t * 2.4));
+}
+Plymouth.SetRefreshFunction(refresh_cb);
+
+# ───────────── پسورد (اگه دیسک رمزنگاری شده باشه) ─────────────
+global.pw_sprite = Sprite();
+global.pw_sprite.SetZ(50);
+global.bl_sprite = Sprite();
+global.bl_sprite.SetZ(50);
+
+fun display_password_cb(prompt, bullets) {
+    p_img = Image.Text(prompt, 0.96, 0.92, 0.82);
+    global.pw_sprite.SetImage(p_img);
+    global.pw_sprite.SetX(global.cx - p_img.GetWidth() / 2);
+    global.pw_sprite.SetY(global.sh * 0.66);
+    global.pw_sprite.SetOpacity(1);
+
+    s = "";
+    for (j = 0; j < bullets; j++) {
+        s = s + "* ";
+    }
+    if (bullets == 0) s = " ";
+    b_img = Image.Text(s, 0.91, 0.80, 0.55);
+    global.bl_sprite.SetImage(b_img);
+    global.bl_sprite.SetX(global.cx - b_img.GetWidth() / 2);
+    global.bl_sprite.SetY(global.sh * 0.66 + 36 * global.k);
+    global.bl_sprite.SetOpacity(1);
+}
+
+fun display_normal_cb() {
+    global.pw_sprite.SetOpacity(0);
+    global.bl_sprite.SetOpacity(0);
+}
+
+Plymouth.SetDisplayPasswordFunction(display_password_cb);
+Plymouth.SetDisplayNormalFunction(display_normal_cb);
+
+# پایان بوت: همه‌ی آیکون‌ها کامل بشن
+fun quit_cb() {
+    global.cb = 1;
+}
+Plymouth.SetQuitFunction(quit_cb);

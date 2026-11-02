@@ -1,0 +1,6 @@
+[Desktop Entry]
+Type=Application
+Name=Genshin Polkit Agent
+Exec=@HOME@/.local/bin/genshin-polkit-launch
+NoDisplay=true
+X-GNOME-Autostart-enabled=true

@@ -1,0 +1,111 @@
+configuration {
+    show-icons:                 false;
+    font:                       "SDK_SC_Web Bold 11";
+    hover-select:               true;
+    me-select-entry:            "";
+    me-accept-entry:            "MousePrimary";
+}
+
+* {
+    bg-dark:                    rgba(22, 26, 38, 0.95);
+    bg-card:                    rgba(36, 43, 61, 0.85);
+    cream:                      #ece5d8;
+    gold:                       #c81d2d;
+    gold-bright:                #e0828b;
+    navy:                       #161a26;
+    background-color:           transparent;
+    text-color:                 @cream;
+}
+
+window {
+    transparency:               "real";
+    location:                   center;
+    anchor:                     center;
+    width:                      560px;
+    border:                     2px;
+    border-color:               @gold;
+    border-radius:              18px;
+    background-color:           @bg-dark;
+    padding:                    16px;
+}
+
+mainbox {
+    spacing:                    12px;
+    children:                   [ "previewcard", "message", "inputbar", "listview" ];
+}
+
+/* the card has the border; the image box inside has NO border/padding,
+   so its size is exactly the size of the thumbnail (500x214) */
+previewcard {
+    orientation:                horizontal;
+    spacing:                    0px;
+    padding:                    0px;
+    border:                     1px;
+    border-color:               @gold;
+    border-radius:              12px;
+    background-color:           @bg-card;
+    children:                   [ "pad-l", "imagebox", "pad-r" ];
+}
+pad-l, pad-r {
+    expand:                     true;
+    background-color:           transparent;
+}
+imagebox {
+    expand:                     false;
+    width:                      500px;
+    height:                     214px;
+    padding:                    0px;
+    border:                     0px;
+    background-color:           transparent;
+}
+
+message {
+    background-color:           @bg-card;
+    border:                     1px;
+    border-color:               rgba(211, 188, 142, 0.35);
+    border-radius:              10px;
+    padding:                    8px 12px;
+}
+textbox {
+    text-color:                 @gold-bright;
+    horizontal-align:           0.5;
+}
+
+inputbar {
+    background-color:           @bg-card;
+    border:                     1px;
+    border-color:               @gold;
+    border-radius:              12px;
+    padding:                    10px 14px;
+    spacing:                    10px;
+    children:                   [ "prompt", "entry" ];
+}
+prompt { text-color: @gold-bright; }
+entry  { text-color: @cream; }
+
+listview {
+    columns:                    1;
+    lines:                      10;
+    cycle:                      true;
+    dynamic:                    true;
+    scrollbar:                  false;
+    spacing:                    6px;
+}
+
+element {
+    padding:                    10px 14px;
+    border-radius:              10px;
+    background-color:           rgba(255, 255, 255, 0.03);
+    border:                     1px;
+    border-color:               rgba(211, 188, 142, 0.15);
+}
+element selected.normal {
+    background-color:           @cream;
+    text-color:                 @navy;
+    border-color:               @gold-bright;
+}
+element-text {
+    background-color:           transparent;
+    text-color:                 inherit;
+    vertical-align:             0.5;
+}

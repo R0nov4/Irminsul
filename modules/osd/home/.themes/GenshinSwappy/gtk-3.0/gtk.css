@@ -1,0 +1,119 @@
+@import url("resource:///org/gtk/libgtk/theme/Adwaita/gtk-contained-dark.css");
+
+@define-color gs_bg       #161a26;
+@define-color gs_card     #242b3d;
+@define-color gs_cream    #ece5d8;
+@define-color gs_gold     #d3bc8e;
+@define-color gs_gold_hi  #f4e8c1;
+
+* {
+    font-family: "SDK_SC_Web", "Noto Sans", sans-serif;
+    font-weight: bold;
+    text-shadow: none;
+    -gtk-icon-shadow: none;
+}
+
+window, window.background {
+    background-color: @gs_bg;
+    background-image: linear-gradient(180deg, #1c2133 0%, #161a26 100%);
+    color: @gs_cream;
+    border: 2px solid @gs_gold;
+    border-radius: 14px;
+}
+
+headerbar, .titlebar {
+    background-image: none;
+    background-color: @gs_bg;
+    border-bottom: 1px solid alpha(@gs_gold, 0.45);
+    color: @gs_gold_hi;
+    box-shadow: none;
+}
+
+/* Buttons */
+button, togglebutton, menubutton > button {
+    background-image: none;
+    background-color: alpha(@gs_card, 0.9);
+    color: @gs_cream;
+    border: 1px solid alpha(@gs_gold, 0.35);
+    border-radius: 10px;
+    padding: 6px 10px;
+    margin: 2px;
+    box-shadow: none;
+    transition: all 150ms ease;
+}
+button:hover, togglebutton:hover {
+    background-image: none;
+    background-color: alpha(@gs_gold, 0.20);
+    border-color: @gs_gold;
+    color: @gs_gold_hi;
+}
+button:disabled { opacity: 0.4; }
+
+/* Toggle / hamburger fix: explicit checked + active states (no black button) */
+button:checked, button.toggle:checked, button:checked:hover, button:active {
+    background-image: none;
+    background-color: alpha(@gs_gold, 0.30);
+    color: @gs_gold_hi;
+    border-color: @gs_gold_hi;
+    box-shadow: 0 0 10px alpha(@gs_gold, 0.45);
+}
+button:checked image, button:active image, button:checked label {
+    color: @gs_gold_hi;
+    -gtk-icon-effect: none;
+}
+revealer, revealer > box, actionbar, actionbar > revealer > box, box.horizontal, box.vertical {
+    background-color: transparent;
+    background-image: none;
+}
+
+/* Size slider */
+scale trough {
+    background-color: alpha(@gs_cream, 0.15);
+    border-radius: 6px;
+    min-height: 6px;
+}
+scale highlight {
+    background-image: none;
+    background-color: @gs_gold;
+    border-radius: 6px;
+}
+scale slider {
+    background-image: none;
+    background-color: @gs_cream;
+    border: 2px solid @gs_gold;
+    border-radius: 50%;
+    min-width: 18px;
+    min-height: 18px;
+    box-shadow: 0 0 8px alpha(@gs_gold, 0.6);
+}
+
+/* Entries, popovers, tooltips */
+entry, spinbutton {
+    background-image: none;
+    background-color: @gs_card;
+    color: @gs_cream;
+    border: 1px solid @gs_gold;
+    border-radius: 8px;
+    box-shadow: none;
+}
+popover, popover.background, menu, .popup {
+    background-color: @gs_bg;
+    border: 2px solid @gs_gold;
+    border-radius: 12px;
+    color: @gs_cream;
+}
+menuitem:hover, modelbutton:hover {
+    background-color: @gs_cream;
+    color: @gs_bg;
+}
+tooltip, tooltip.background {
+    background-color: @gs_bg;
+    color: @gs_gold_hi;
+    border: 1px solid @gs_gold;
+    border-radius: 8px;
+}
+separator { background-color: alpha(@gs_gold, 0.3); }
+scrollbar slider {
+    background-color: alpha(@gs_gold, 0.5);
+    border-radius: 6px;
+}

@@ -1,0 +1,2877 @@
+#!/usr/bin/env python3
+"""
+irminsul-settings  —  The Resonance Archive
+Genshin-styled advanced sound settings for irminsul-volume (GTK3 + Cairo, talks to PipeWire / PulseAudio).
+
+Pages
+  Outputs      port, volume up to 150 %, L/R balance, suspend, set default, Co-op (any devices you pick), Mono
+  Inputs       port, boost, balance, Clear Voice (WebRTC noise suppression), Hear Yourself (loopback), live level
+  Party        per-app output routing, boost, balance, banish stream, recording-stream routing
+  Profiles     card profiles (A2DP / HFP / 5.1 / HDMI ...) and Bluetooth codecs (LDAC, aptX, AAC ...)
+  Equalizer    real 10-band parametric EQ (PipeWire filter-chain) with presets, preamp, band width
+  Astrolabe    live stereo radial spectrum, peak meter, L/R speaker test, sweep, pink noise, tone generator
+  Engine       force sample rate / quantum (latency), allowed rates, loaded modules, restart audio stack
+  Mixer        how the popup behaves (position, step, ceiling, presets, sections, motion)
+  Night Watch  sleep timer that fades the music out and pauses players
+
+Everything is vector-drawn with Cairo. No game assets.
+Deps: python-gobject python-cairo gtk3 + pactl/parec/paplay (libpulse), pw-metadata/pw-cli (pipewire)
+      optional: playerctl (Night Watch pause), python-numpy (faster spectrum)
+
+Usage:
+  irminsul-settings                open (or focus) the archive
+  irminsul-settings --page eq      open on a page: outputs inputs streams profiles eq astro engine mixer night
+  irminsul-settings --restore      re-apply saved EQ / Mono / Co-op / Clear Voice / clock  (use as exec-once)
+  irminsul-settings --demo         fake devices, to try the UI without touching your audio
+"""
+import os, sys, re, json, math, time, random, array, signal, cmath, subprocess, threading
+from concurrent.futures import ThreadPoolExecutor
+
+PREVIEW = os.environ.get("IRMINSUL_PREVIEW") == "1"
+DEMO = PREVIEW or "--demo" in sys.argv
+SELF = os.path.abspath(__file__)
+CFG_DIR = os.path.join(os.environ.get("XDG_CONFIG_HOME", os.path.expanduser("~/.config")), "irminsul-volume")
+CFG_PATH = os.path.join(CFG_DIR, "settings.json")
+RT_PATH = os.path.join(os.environ.get("XDG_RUNTIME_DIR", "/tmp"), "irminsul-state.json")
+EQ_CONF = os.path.join(CFG_DIR, "irminsul-eq.conf")
+POOL = ThreadPoolExecutor(max_workers=4)
+COMMANDS = ThreadPoolExecutor(max_workers=1)  # last slider value must be applied last
+
+try:
+    import numpy as np
+except Exception:
+    np = None
+
+if PREVIEW:
+    import cairocffi as cairo
+    Gtk = Gdk = GLib = Gio = Pango = PangoCairo = None
+else:
+    import gi
+    gi.require_version("Gtk", "3.0"); gi.require_version("Gdk", "3.0")
+    gi.require_version("Pango", "1.0"); gi.require_version("PangoCairo", "1.0")
+    from gi.repository import Gtk, Gdk, GLib, Gio, Pango, PangoCairo
+    import cairo
+
+# ───────────────────────────── config ─────────────────────────────
+EQ_FREQS = [32, 64, 125, 250, 500, 1000, 2000, 4000, 8000, 16000]
+EQ_PRESETS = [
+    ("Flat", [0] * 10),
+    ("Geo · Bedrock", [6, 5, 4, 2, 0, 0, 0, 0, 0, 0]),
+    ("Hydro · Depths", [3, 3, 2, 1, 0, -1, -1, -2, -2, -3]),
+    ("Anemo · Breeze", [-2, -1, 0, 1, 3, 4, 3, 1, 0, -1]),
+    ("Cryo · Crystal", [0, 0, 0, 0, 0, 1, 2, 4, 5, 6]),
+    ("Electro · Surge", [5, 4, 2, 0, -2, -2, 0, 2, 4, 5]),
+    ("Pyro · Ember", [5, 4, 2, 0, -1, 0, 1, 3, 4, 4]),
+    ("Dendro · Grove", [-6, -4, -2, 0, 2, 3, 3, 2, 0, -2]),
+]
+DEFAULTS = {
+    "position": "center", "scroll_step": 3, "ceiling": 100, "boost_limit": 150,
+    "presets": [["Serenitea", 20], ["Adventure", 50], ["Domain", 80], ["Burst", 100]],
+    "follow_streams": True, "chime_on_switch": False, "show_mic": True, "show_apps": True, "reduced_motion": False,
+    "eq": {"enabled": False, "preset": "Flat", "gains": [0] * 10, "preamp": 0.0, "q": 1.0, "target": ""},
+    "mono": False, "coop": False, "clear_voice": False, "loopback": False,
+    "coop_devices": None, "coop_sync": True,
+    "force_rate": 0, "force_quantum": 0, "allowed_rates": "",
+    "astro": {"source": "out", "smooth": 1},
+    "night": {"minutes": 30, "curve": 1, "action": 1},
+}
+
+
+def _merge(base, over):
+    out = json.loads(json.dumps(base))
+    for k, v in (over or {}).items():
+        if isinstance(v, dict) and isinstance(out.get(k), dict):
+            out[k] = _merge(out[k], v)
+        else:
+            out[k] = v
+    return out
+
+
+def load_cfg():
+    try:
+        with open(CFG_PATH) as f:
+            return _merge(DEFAULTS, json.load(f))
+    except Exception:
+        return _merge(DEFAULTS, {})
+
+
+def save_cfg(cfg):
+    if DEMO:
+        return
+    try:
+        os.makedirs(CFG_DIR, exist_ok=True)
+        tmp = CFG_PATH + ".tmp"
+        with open(tmp, "w") as f:
+            json.dump(cfg, f, indent=2)
+        os.replace(tmp, CFG_PATH)
+    except Exception:
+        pass
+
+
+def load_rt():
+    try:
+        with open(RT_PATH) as f:
+            return json.load(f)
+    except Exception:
+        return {}
+
+
+def save_rt(rt):
+    if DEMO:
+        return
+    try:
+        with open(RT_PATH, "w") as f:
+            json.dump(rt, f)
+    except Exception:
+        pass
+
+
+# ───────────────────────────── palette ─────────────────────────────
+def hx(h):
+    h = h.lstrip("#")
+    return tuple(int(h[i:i + 2], 16) / 255 for i in (0, 2, 4))
+
+
+def mix(a, b, t):
+    return tuple(a[i] * (1 - t) + b[i] * t for i in range(3))
+
+
+GOLD, GOLD_HI, GOLD_LO = hx("D3BC8E"), hx("F3E7C4"), hx("A38B5A")
+IVORY, INK = hx("ECE5D8"), hx("3B4255")
+NAVY, NAVY2, NAVY3 = hx("2B3042"), hx("383E54"), hx("4A5169")
+DEEP = hx("1B1E2B")
+MUTE_C, DANGER = hx("8A8D99"), hx("E5675A")
+O_YEL, X_BLUE = hx("F2C14E"), hx("4F8FD9")
+ELEMENTS = [("Pyro", "EF7938"), ("Hydro", "33BEFF"), ("Anemo", "66E6BD"), ("Electro", "B58AE0"),
+            ("Dendro", "A5C83B"), ("Cryo", "98C8E8"), ("Geo", "F8BA4E")]
+EL = [(n, hx(c)) for n, c in ELEMENTS]
+FONT = "HYWenHei-85W,SDK_SC_Web,Noto Sans,Sans"
+
+
+def elc(i):
+    return GOLD if i is None or i < 0 else EL[i % 7][1]
+
+
+def el_grad(t):
+    """Colour along the seven elements, t in 0..1 (Pyro -> Geo order shuffled for a nice spectrum)."""
+    seq = [EL[0][1], EL[6][1], EL[4][1], EL[2][1], EL[1][1], EL[5][1], EL[3][1]]
+    t = max(0.0, min(0.9999, t)) * (len(seq) - 1)
+    i = int(t)
+    return mix(seq[i], seq[i + 1], t - i)
+
+
+# ───────────────────────────── drawing helpers ─────────────────────────────
+def A(cr, c, a=1.0):
+    cr.set_source_rgba(c[0], c[1], c[2], a)
+
+
+def rrect(cr, x, y, w, h, r):
+    r = max(0.0, min(r, w / 2, h / 2))
+    cr.new_sub_path()
+    cr.arc(x + w - r, y + r, r, -math.pi / 2, 0)
+    cr.arc(x + w - r, y + h - r, r, 0, math.pi / 2)
+    cr.arc(x + r, y + h - r, r, math.pi / 2, math.pi)
+    cr.arc(x + r, y + r, r, math.pi, 1.5 * math.pi)
+    cr.close_path()
+
+
+def diamond(cr, x, y, r):
+    cr.move_to(x, y - r); cr.line_to(x + r, y); cr.line_to(x, y + r); cr.line_to(x - r, y); cr.close_path()
+
+
+def star(cr, x, y, r, k=0.22, rot=0.0, n=4):
+    for i in range(n * 2):
+        rad = r if i % 2 == 0 else r * k
+        a = rot + i * math.pi / n - math.pi / 2
+        (cr.move_to if i == 0 else cr.line_to)(x + rad * math.cos(a), y + rad * math.sin(a))
+    cr.close_path()
+
+
+if PREVIEW:
+    def _face(cr, size, bold):
+        cr.select_font_face("DejaVu Sans", 0, 1 if bold else 0); cr.set_font_size(size * 0.92)
+
+    def measure(cr, s, size, bold=False):
+        _face(cr, size, bold); return cr.text_extents(s)[4]
+
+    def text(cr, s, x, y, size, col, a=1.0, bold=False, anchor="l", width=None):
+        _face(cr, size, bold)
+        if width and cr.text_extents(s)[4] > width:
+            while s and cr.text_extents(s + "…")[4] > width:
+                s = s[:-1]
+            s += "…"
+        w = cr.text_extents(s)[4]
+        ox = x - (w if anchor == "r" else w / 2 if anchor == "c" else 0)
+        cr.move_to(ox, y + size * 0.34); A(cr, col, a); cr.show_text(s)
+        return w
+
+    def para(cr, s, x, y, size, col, a, width, lh=1.5):
+        _face(cr, size, False); A(cr, col, a)
+        line, yy = "", y + size
+        for word in s.split(" "):
+            t = (line + " " + word).strip()
+            if cr.text_extents(t)[4] > width and line:
+                cr.move_to(x, yy); cr.show_text(line); yy += size * lh; line = word
+            else:
+                line = t
+        if line:
+            cr.move_to(x, yy); cr.show_text(line); yy += size * lh
+        return yy - y - size * 0.6
+else:
+    _LAY_CACHE = {}
+    _FD_CACHE = {}
+
+    def _layout(cr, s, size, bold, width=None, wrap=False):
+        key = None if wrap else (s, size, bold, int(width) if width else 0)
+        if key is not None:
+            lay = _LAY_CACHE.get(key)
+            if lay is not None:
+                PangoCairo.update_layout(cr, lay)
+                return lay
+        lay = PangoCairo.create_layout(cr)
+        fk = (size, bold)
+        fd = _FD_CACHE.get(fk)
+        if fd is None:
+            fd = Pango.FontDescription(); fd.set_family(FONT)
+            fd.set_absolute_size(size * Pango.SCALE)
+            fd.set_weight(Pango.Weight.BOLD if bold else Pango.Weight.NORMAL)
+            _FD_CACHE[fk] = fd
+        lay.set_font_description(fd); lay.set_text(s, -1)
+        if width:
+            lay.set_width(int(width * Pango.SCALE))
+            if wrap:
+                lay.set_wrap(Pango.WrapMode.WORD_CHAR)
+            else:
+                lay.set_ellipsize(Pango.EllipsizeMode.END)
+        if key is not None:
+            if len(_LAY_CACHE) > 900:
+                _LAY_CACHE.clear()
+            _LAY_CACHE[key] = lay
+        return lay
+
+    def measure(cr, s, size, bold=False):
+        return _layout(cr, s, size, bold).get_pixel_size()[0]
+
+    def text(cr, s, x, y, size, col, a=1.0, bold=False, anchor="l", width=None):
+        if "\n" in s:
+            s = " ".join(s.split())
+        lay = _layout(cr, s, size, bold, width)
+        w, h = lay.get_pixel_size()
+        ox = x - (w if anchor == "r" else w / 2 if anchor == "c" else 0)
+        cr.move_to(ox, y - h / 2); A(cr, col, a); PangoCairo.show_layout(cr, lay)
+        return w
+
+    def para(cr, s, x, y, size, col, a, width, lh=1.5):
+        lay = _layout(cr, s, size, False, width, wrap=True)
+        try:
+            lay.set_line_spacing(lh * 0.86)
+        except Exception:
+            pass
+        cr.move_to(x, y); A(cr, col, a); PangoCairo.show_layout(cr, lay)
+        return lay.get_pixel_size()[1]
+
+
+def icon(cr, kind, x, y, s, col, a=1.0, muted=False):
+    """Vector icons on a 24-unit grid centred on (x, y)."""
+    cr.save(); cr.translate(x, y); cr.scale(s / 24.0, s / 24.0)
+    A(cr, col, a); cr.set_line_cap(cairo.LINE_CAP_ROUND); cr.set_line_join(cairo.LINE_JOIN_ROUND)
+    cr.set_line_width(2.2)
+    if kind == "speaker":
+        cr.move_to(-10, -4); cr.line_to(-5, -4); cr.line_to(1, -9); cr.line_to(1, 9)
+        cr.line_to(-5, 4); cr.line_to(-10, 4); cr.close_path(); cr.fill()
+        if not muted:
+            for r in (5.5, 10):
+                cr.new_path(); cr.arc(1, 0, r, -0.85, 0.85); cr.stroke()
+        else:
+            A(cr, DANGER, a); cr.set_line_width(2.4)
+            cr.move_to(6, -4.5); cr.line_to(12, 4.5); cr.move_to(12, -4.5); cr.line_to(6, 4.5); cr.stroke()
+    elif kind == "mic":
+        rrect(cr, -3.8, -11, 7.6, 14, 3.8); cr.fill()
+        cr.new_path(); cr.arc(0, -1, 7.5, 0, math.pi); cr.stroke()
+        cr.move_to(0, 6.5); cr.line_to(0, 11); cr.move_to(-4, 11); cr.line_to(4, 11); cr.stroke()
+    elif kind == "headphones":
+        cr.set_line_width(2.4); cr.new_path(); cr.arc(0, 1, 8.5, math.pi, 2 * math.pi); cr.stroke()
+        rrect(cr, -11, 1, 5.5, 10, 2.2); cr.fill(); rrect(cr, 5.5, 1, 5.5, 10, 2.2); cr.fill()
+    elif kind == "monitor":
+        rrect(cr, -10.5, -8.5, 21, 14, 2.2); cr.stroke()
+        cr.move_to(0, 6); cr.line_to(0, 10); cr.move_to(-5, 10.5); cr.line_to(5, 10.5); cr.stroke()
+    elif kind == "close":
+        cr.move_to(-6, -6); cr.line_to(6, 6); cr.move_to(6, -6); cr.line_to(-6, 6); cr.stroke()
+    elif kind == "party":
+        for dx, r, yy in ((-7, 3.2, -3), (7, 3.2, -3), (0, 4, -5)):
+            cr.new_path(); cr.arc(dx, yy, r, 0, 2 * math.pi); cr.fill()
+        for dx, w in ((-7, 5.5), (7, 5.5)):
+            cr.new_path(); cr.arc(dx, 7, w, math.pi, 2 * math.pi); cr.fill()
+        cr.new_path(); cr.arc(0, 8, 7, math.pi, 2 * math.pi); A(cr, col, a); cr.fill()
+    elif kind == "card":
+        rrect(cr, -9, -9, 18, 18, 3); cr.stroke()
+        rrect(cr, -4, -4, 8, 8, 1.5); cr.fill()
+        for k in (-5, 0, 5):
+            for (x0, y0, x1, y1) in ((k, -9, k, -12), (k, 9, k, 12), (-9, k, -12, k), (9, k, 12, k)):
+                cr.move_to(x0, y0); cr.line_to(x1, y1)
+        cr.stroke()
+    elif kind == "eq":
+        for i, (xx, kn) in enumerate(((-7, 3), (0, -4), (7, 1))):
+            cr.move_to(xx, -10); cr.line_to(xx, 10); cr.stroke()
+            diamond(cr, xx, kn, 3.6); cr.fill()
+    elif kind == "astro":
+        cr.new_path(); cr.arc(0, 0, 9.5, 0, 2 * math.pi); cr.stroke()
+        star(cr, 0, 0, 8, 0.25); cr.fill()
+        cr.set_line_width(1.4); cr.new_path(); cr.arc(0, 0, 4, 0, 2 * math.pi); A(cr, NAVY, a); cr.fill()
+    elif kind in ("engine", "gear"):
+        n = 8 if kind == "gear" else 6
+        for i in range(n):
+            ang = i * 2 * math.pi / n
+            cr.save(); cr.rotate(ang); rrect(cr, -2.4, -11.5, 4.8, 6, 1); cr.fill(); cr.restore()
+        cr.new_path(); cr.arc(0, 0, 7.5, 0, 2 * math.pi); cr.set_line_width(3.4); cr.stroke()
+        if kind == "engine":
+            star(cr, 0, 0, 3.5, 0.3); cr.fill()
+    elif kind == "moon":
+        cr.new_path(); cr.arc(0, 0, 10, 0, 2 * math.pi); cr.new_sub_path()
+        cr.arc_negative(5, -4, 8.5, 2 * math.pi, 0); cr.set_fill_rule(cairo.FILL_RULE_EVEN_ODD); cr.fill()
+        cr.set_fill_rule(cairo.FILL_RULE_WINDING)
+        star(cr, 6, 5, 3.4, 0.25); cr.fill()
+    elif kind == "play":
+        cr.move_to(-5, -8); cr.line_to(8, 0); cr.line_to(-5, 8); cr.close_path(); cr.fill()
+    elif kind == "stop":
+        rrect(cr, -7, -7, 14, 14, 2); cr.fill()
+    elif kind == "bt":
+        cr.move_to(-6, -6); cr.line_to(6, 6); cr.line_to(0, 11); cr.line_to(0, -11); cr.line_to(6, -6); cr.line_to(-6, 6)
+        cr.stroke()
+    elif kind == "wave":
+        cr.move_to(-11, 0)
+        for i in range(23):
+            xx = -11 + i
+            cr.line_to(xx, math.sin(i * 0.8) * 7 * math.sin(i / 22 * math.pi))
+        cr.stroke()
+    elif kind == "restart":
+        cr.new_path(); cr.arc(0, 0, 8.5, -0.3, 1.5 * math.pi + 0.2); cr.stroke()
+        cr.move_to(1, -12.5); cr.line_to(5, -8.5); cr.line_to(0.5, -5.5); cr.close_path(); cr.fill()
+    elif kind == "check":
+        cr.move_to(-8, 0); cr.line_to(-2, 6); cr.line_to(9, -6); cr.stroke()
+    if muted and kind in ("mic", "headphones", "monitor"):
+        A(cr, DANGER, a); cr.set_line_width(2.6); cr.move_to(-10, 10); cr.line_to(10, -10); cr.stroke()
+    cr.restore()
+
+
+# ───────────────────────────── audio backend ─────────────────────────────
+def clean_env():
+    env = dict(os.environ)
+    env.pop("IRMINSUL_NO_REEXEC", None)
+    pre = [x for x in env.get("LD_PRELOAD", "").split(":") if x and "gtk-layer-shell" not in x]
+    if pre:
+        env["LD_PRELOAD"] = ":".join(pre)
+    else:
+        env.pop("LD_PRELOAD", None)
+    return env
+
+
+def sh(*cmd, timeout=3):
+    if DEMO:
+        return ""
+    try:
+        return subprocess.run(cmd, capture_output=True, text=True, timeout=timeout).stdout
+    except Exception:
+        return ""
+
+
+def run(cmd):
+    if DEMO:
+        return True
+    try:
+        return subprocess.run(cmd, capture_output=True, timeout=6).returncode == 0
+    except Exception:
+        return False
+
+
+def pj(*args):
+    try:
+        return json.loads(sh("pactl", "--format=json", *args))
+    except Exception:
+        return [] if args[0] == "list" else {}
+
+
+def chan_list(d):
+    vol = d.get("volume") or {}
+    return [(k, v.get("value", 0) / 65536 * 100) for k, v in vol.items()]
+
+
+def vol_of(ch):
+    return round(max([v for _, v in ch] or [0]))
+
+
+def bal_of(ch):
+    L = [v for k, v in ch if "left" in k]; R = [v for k, v in ch if "right" in k]
+    if not L or not R:
+        return 0
+    l, r = sum(L) / len(L), sum(R) / len(R); m = max(l, r)
+    return 0 if m <= 0 else round((r - l) / m * 100)
+
+
+def chan_values(ch, vol, bal):
+    """Per-channel percentages for a target volume and balance (-100 left ... +100 right)."""
+    out = []
+    for k, _ in (ch or [("mono", 0)]):
+        v = vol
+        if "left" in k:
+            v *= 1 - max(0, bal) / 100
+        elif "right" in k:
+            v *= 1 + min(0, bal) / 100
+        out.append(f"{max(0, int(round(v)))}%")
+    return out
+
+
+def kind_of(d):
+    p = d.get("properties", {})
+    ff, n, port = p.get("device.form_factor", "").lower(), d["name"].lower(), (d.get("active_port") or "").lower()
+    if "hdmi" in n or "hdmi" in port or "displayport" in port:
+        return "monitor"
+    if ff in ("headphone", "headset", "hands-free", "handsfree") or "headphone" in port or "headset" in port or "bluez" in n:
+        return "headphones"
+    return "speaker"
+
+
+def _dev(d):
+    ch = chan_list(d)
+    ports = [(p.get("name"), p.get("description", p.get("name")), p.get("availability", "")) for p in d.get("ports", [])]
+    p = d.get("properties", {})
+    return dict(name=d["name"], idx=d.get("index"), desc=d.get("description") or d["name"], ch=ch, vol=vol_of(ch),
+                bal=bal_of(ch), mute=bool(d.get("mute")), state=(d.get("state") or "").title(), ports=ports,
+                port=d.get("active_port"), spec=d.get("sample_specification", ""), kind=kind_of(d),
+                api=p.get("device.api", p.get("factory.name", "")), virtual=d["name"].startswith("irminsul") or
+                d["name"].startswith("effect_input.irminsul"))
+
+
+def snapshot():
+    if DEMO:
+        return demo_state()
+    sinks = [_dev(s) for s in pj("list", "sinks")]
+    srcs = [_dev(s) for s in pj("list", "sources") if not s["name"].endswith(".monitor")]
+    cards = []
+    for c in pj("list", "cards"):
+        profs = [(n, p.get("description", n), bool(p.get("available", True)))
+                 for n, p in (c.get("profiles") or {}).items()]
+        cards.append(dict(name=c["name"], idx=c.get("index"), desc=(c.get("properties") or {}).get("device.description", c["name"]),
+                          profiles=profs, active=c.get("active_profile"), bluez=c["name"].startswith("bluez")))
+    apps = []
+    for a in pj("list", "sink-inputs"):
+        p = a.get("properties", {})
+        name = p.get("application.name") or p.get("media.name") or "Unknown"
+        if "irminsul" in name.lower() or internal_stream(a):
+            continue
+        icons = [p.get("application.icon_name"), (p.get("application.process.binary") or "").lower(), name.lower()]
+        ch = chan_list(a)
+        apps.append(dict(idx=a["index"], name=name, media=p.get("media.name", ""), icons=[i for i in icons if i],
+                         ch=ch, vol=vol_of(ch), bal=bal_of(ch), mute=bool(a.get("mute")), sink=a.get("sink"),
+                         corked=bool(a.get("corked"))))
+    recs = []
+    for r in pj("list", "source-outputs"):
+        p = r.get("properties", {})
+        name = p.get("application.name") or p.get("media.name") or "Unknown"
+        if "irminsul" in name.lower() or name in ("parec", "PulseAudio Volume Control"):
+            continue
+        recs.append(dict(idx=r["index"], name=name, media=p.get("media.name", ""), src=r.get("source")))
+    mods = [dict(idx=m.get("index"), name=m.get("name", ""), arg=" ".join((m.get("argument") or "").split())[:240]) for m in pj("list", "modules")]
+    info = pj("info")
+    return dict(sinks=sinks, srcs=srcs, cards=cards, apps=apps, recs=recs, mods=mods, info=info or {},
+                default_sink=sh("pactl", "get-default-sink").strip(),
+                default_src=sh("pactl", "get-default-source").strip(), clock=clock_settings())
+
+
+def clock_settings():
+    out = {}
+    for line in sh("pw-metadata", "-n", "settings").splitlines():
+        m = re.search(r"key:'([^']+)'\s+value:'([^']*)'", line)
+        if m:
+            out[m.group(1)] = m.group(2)
+    return out
+
+
+def bt_codecs(card):
+    if DEMO:
+        return [("sbc", "SBC"), ("aac", "AAC"), ("aptx_hd", "aptX HD"), ("ldac", "LDAC")], "ldac"
+    path = f"/card/{card}/bluez"
+    try:
+        lst = json.loads(sh("pactl", "send-message", path, "list-codecs") or "[]")
+        cur = json.loads(sh("pactl", "send-message", path, "get-codec") or '""')
+        return [(c.get("name"), c.get("description", c.get("name"))) for c in lst], cur
+    except Exception:
+        return [], ""
+
+
+def hw_sinks(st):
+    return [s for s in st.get("sinks", []) if not s["virtual"]]
+
+
+def load_module(*args):
+    if DEMO:
+        return random.randint(500, 900)
+    out = sh("pactl", "load-module", *args).strip()
+    return int(out) if out.isdigit() else None
+
+
+def unload_module(idx):
+    if idx is not None:
+        run(["pactl", "unload-module", str(idx)])
+
+
+def move_all(st, sink):
+    """Move every real playback stream to `sink`. Returns the list of stream names that could not be moved.
+    A stream that ended meanwhile, or is already there, is not a failure."""
+    failed = []
+    for a in st.get("apps", []):
+        if internal_stream(a):
+            continue
+        cmd = ["pactl", "move-sink-input", str(a["idx"]), sink]
+        if run(cmd):
+            continue
+        time.sleep(0.12)
+        if run(cmd):
+            continue
+        if DEMO:
+            continue
+        sinks = {s["index"]: s["name"] for s in pj("list", "sinks")}
+        live = {x["index"]: x for x in pj("list", "sink-inputs")}
+        cur = live.get(a["idx"])
+        if cur is None or sinks.get(cur.get("sink")) == sink:
+            continue
+        failed.append(a.get("name", "?"))
+    return failed
+
+
+def mod_alive(st, idx):
+    return idx is not None and any(m["idx"] == idx for m in st.get("mods", []))
+
+
+# ── resonance modes (each returns a short message for the toast) ──
+def internal_stream(a):
+    """Do not move server-side playback legs into their own input sink."""
+    driver = str(a.get("driver", "")).lower()
+    return any(k in driver for k in ("combine", "loopback", "remap", "filter")) or (
+        a.get("client") is None and a.get("owner_module") is not None)
+
+
+def _coop_sink_of(m):
+    for tok in m.get("arg", "").split():
+        if tok.startswith("sink_name=irminsul_coop"):
+            return tok.split("=", 1)[1]
+    return None
+
+
+def coop_modules(st):
+    """Every combine module we ever created (leaked ones included)."""
+    return [m for m in st.get("mods", []) if m["name"] == "module-combine-sink" and _coop_sink_of(m)]
+
+
+def coop_module(st):
+    mods = coop_modules(st)
+    return mods[0] if mods else None
+
+
+def _short(*args):
+    """Plain `pactl list short ...` lines, or None when pactl failed (unknown is NOT the same as empty)."""
+    try:
+        p = subprocess.run(["pactl", "list", "short", *args], capture_output=True, text=True, timeout=8)
+    except Exception:
+        return None
+    return p.stdout.splitlines() if p.returncode == 0 else None
+
+
+def coop_live():
+    """(module ids, sink names) of every Co-op group, read straight from pactl without JSON or truncation.
+    Returns None if the server could not be queried."""
+    mods, sinks = _short("modules"), _short("sinks")
+    if mods is None or sinks is None:
+        return None
+    ids = []
+    for line in mods:
+        f = line.split("\t")
+        if len(f) >= 2 and f[1] == "module-combine-sink" and "irminsul_coop" in "\t".join(f[2:]) and f[0].isdigit():
+            ids.append(int(f[0]))
+    names = [l.split("\t")[1] for l in sinks if len(l.split("\t")) > 1 and l.split("\t")[1].startswith("irminsul_coop")]
+    return ids, names
+
+
+def unload_all_coop(keep=None):
+    """Unload every Co-op module except `keep`. True only when pactl itself confirms they are gone."""
+    if DEMO:
+        return True
+    for _ in range(8):
+        live = coop_live()
+        if live is None:                # server did not answer: unknown, never 'gone'
+            time.sleep(0.3)
+            continue
+        ids, names = live
+        left = [i for i in ids if i != keep]
+        if not left and (keep is not None or not names):
+            return True
+        for i in left:
+            run(["pactl", "unload-module", str(i)])
+        time.sleep(0.3)
+    live = coop_live()
+    return bool(live) and not [i for i in live[0] if i != keep] and (keep is not None or not live[1])
+
+
+def coop_opts(rt):
+    """(selected sink names or None for 'every output', latency sync on/off)."""
+    cfg = load_cfg()
+    return (rt["coop_sel"] if "coop_sel" in rt else cfg["coop_devices"],
+            rt["coop_sync"] if "coop_sync" in rt else cfg["coop_sync"])
+
+
+def coop_members(st, sel):
+    """Connected real outputs that take part in Co-op. sel=None means all of them."""
+    names = [s["name"] for s in hw_sinks(st)]
+    return names if sel is None else [n for n in names if n in sel]
+
+
+def mode_coop(on, rt, st):
+    """Build the replacement first, then switch; always remove every old/leaked group."""
+    olds = coop_modules(st)
+    old_names = {_coop_sink_of(m) for m in olds}
+    old_sinks = [s for s in st["sinks"] if s["name"] in old_names]
+    old_sink = next((s for s in old_sinks if s["name"] == st.get("default_sink")), old_sinks[0] if old_sinks else None)
+    hardware = hw_sinks(st)
+    names_hw = [s["name"] for s in hardware]
+    if not on:
+        live = None if DEMO else coop_live()
+        if not olds and not old_sinks and (DEMO or (live is not None and not live[0] and not live[1])):
+            for key in ("coop_mod", "coop_sink", "coop_prev", "coop_members"):
+                rt.pop(key, None)
+            return "Co-op ended"
+        prev = rt.get("coop_prev")
+        target = prev if prev in names_hw else (names_hw[0] if names_hw else None)
+        if target:
+            run(["pactl", "set-default-sink", target])
+            affected = dict(st, apps=[a for a in st["apps"] if a["sink"] in {s["idx"] for s in old_sinks}])
+            move_all(affected, target)
+        if not unload_all_coop():
+            return "Could not fully end Co-op; some groups are still loaded"
+        if target:                      # the session manager may have picked a leftover sink meanwhile
+            run(["pactl", "set-default-sink", target])
+            fresh = snapshot()
+            move_all(dict(fresh, apps=[a for a in fresh["apps"]
+                                       if a["sink"] not in {s["idx"] for s in fresh["sinks"] if s["name"] == target}]), target)
+        for key in ("coop_mod", "coop_sink", "coop_prev", "coop_members"):
+            rt.pop(key, None)
+        return "Co-op ended"
+    sel, sync = coop_opts(rt)
+    names = coop_members(st, sel)
+    if len(names) < 2:
+        return "Co-op needs at least two of the chosen devices to be connected"
+    previous_default = st.get("default_sink")
+    existing = {s["name"] for s in st["sinks"]}
+    target = "irminsul_coop" if "irminsul_coop" not in existing else "irminsul_coop_next"
+    args = [f"sink_name={target}", "slaves=" + ",".join(names),
+            "sink_properties=device.description=Irminsul-Co-op"]
+    idx = load_module("module-combine-sink", *args, *(["latency_compensate=true"] if sync else []))
+    compensated = sync
+    if idx is None and sync:
+        idx = load_module("module-combine-sink", *args); compensated = False
+    if idx is None:
+        return "The server refused Co-op; previous output unchanged"
+    ready = DEMO
+    for _ in range(20) if not DEMO else ():
+        if any(s["name"] == target for s in snapshot()["sinks"]):
+            ready = True; break
+        time.sleep(0.1)
+    if not ready:
+        unload_module(idx)
+        return "Co-op output did not appear; previous output unchanged"
+    gain_ok = True
+    if old_sink:
+        gain_ok = run(["pactl", "set-sink-volume", target, f"{old_sink['vol']}%"])
+        gain_ok = run(["pactl", "set-sink-mute", target, str(int(old_sink["mute"]))]) and gain_ok
+    if not gain_ok or not run(["pactl", "set-default-sink", target]):
+        unload_module(idx)
+        return "Could not activate Co-op; previous output unchanged"
+    stuck = move_all(st, target)
+    real = [a for a in st["apps"] if not internal_stream(a)]
+    if stuck and len(stuck) == len(real):
+        for a in real:
+            run(["pactl", "move-sink-input", str(a["idx"]), str(a["sink"])])
+        if previous_default:
+            run(["pactl", "set-default-sink", previous_default])
+        unload_module(idx)
+        return "Could not route any stream to Co-op; switch rolled back"
+    unload_all_coop(keep=idx)
+    if previous_default in names_hw:
+        rt["coop_prev"] = previous_default
+    rt.update(coop_mod=idx, coop_sink=target, coop_members=names)
+    suffix = " (latency compensation unavailable)" if sync and not compensated else ""
+    if stuck:
+        suffix += f" ({len(stuck)} stream(s) stayed on the old output; replay them)"
+    return f"Co-op: playing through {len(names)} devices" + suffix
+
+
+def coop_reload(rt, st):
+    sel, _ = coop_opts(rt)
+    if len(coop_members(st, sel)) < 2:
+        return mode_coop(False, rt, st) + " (fewer than two devices chosen)"
+    return mode_coop(True, rt, st)
+
+
+def coop_control(action, name=None):
+    """Headless entry point used by the popup."""
+    cfg, rt, st = load_cfg(), load_rt(), snapshot()
+    rt.pop("coop_sel", None); rt.pop("coop_sync", None)
+    if action == "cleanup":
+        msg = mode_coop(False, rt, st) if coop_modules(st) else "No leftover Co-op groups"
+        cfg["coop"] = False; save_cfg(cfg); save_rt(rt)
+        return dict(ok=True, message=msg)
+    if action == "pick":
+        if name not in [s["name"] for s in hw_sinks(st)]:
+            return dict(ok=False, message="That device is no longer connected")
+        selected = list(cfg["coop_devices"] if cfg["coop_devices"] is not None else coop_members(st, None))
+        selected.remove(name) if name in selected else selected.append(name)
+        cfg["coop_devices"] = selected; rt["coop_sel"] = selected
+        save_cfg(cfg)
+        msg = coop_reload(rt, st) if coop_module(st) else "Co-op selection saved"
+    else:
+        msg = mode_coop(not bool(coop_module(st)), rt, st)
+    cfg["coop"] = bool(coop_module(snapshot())) if not DEMO else "coop_mod" in rt
+    save_cfg(cfg); save_rt(rt)
+    return dict(ok=not any(x in msg.lower() for x in ("refused", "could not", "needs at least", "did not appear")), message=msg)
+
+
+def mode_mono(on, rt, st):
+    if on:
+        master = st.get("default_sink")
+        if not master or master.startswith("irminsul"):
+            hw = hw_sinks(st); master = hw[0]["name"] if hw else None
+        if not master:
+            return "No output to fold into mono"
+        idx = load_module("module-remap-sink", "sink_name=irminsul_mono", f"master={master}", "channels=1",
+                          "channel_map=mono", "sink_properties=device.description=Irminsul-Mono")
+        if idx is None:
+            return "The server refused the Mono module"
+        rt["mono_mod"], rt["mono_prev"] = idx, master; time.sleep(0.4)
+        run(["pactl", "set-default-sink", "irminsul_mono"]); move_all(st, "irminsul_mono")
+        return "Mono audio on"
+    unload_module(rt.pop("mono_mod", None))
+    prev = rt.pop("mono_prev", None)
+    if prev:
+        run(["pactl", "set-default-sink", prev])
+    return "Mono audio off"
+
+
+def mode_clear_voice(on, rt, st):
+    if on:
+        src = st.get("default_src")
+        if not src or src.startswith("irminsul"):
+            hw = [s for s in st.get("srcs", []) if not s["virtual"]]; src = hw[0]["name"] if hw else None
+        if not src:
+            return "No microphone found"
+        idx = load_module("module-echo-cancel", "aec_method=webrtc", f"source_master={src}",
+                          "source_name=irminsul_clear_voice", "sink_name=irminsul_aec_ref",
+                          "source_properties=device.description=Irminsul-Clear-Voice",
+                          "sink_properties=device.description=Irminsul-Echo-Reference")
+        if idx is None:
+            return "The server refused the Clear Voice module"
+        rt["clear_mod"], rt["clear_prev"] = idx, src; time.sleep(0.4)
+        run(["pactl", "set-default-source", "irminsul_clear_voice"])
+        return "Clear Voice on: noise and echo are being filtered"
+    unload_module(rt.pop("clear_mod", None))
+    prev = rt.pop("clear_prev", None)
+    if prev:
+        run(["pactl", "set-default-source", prev])
+    return "Clear Voice off"
+
+
+def mode_loopback(on, rt, st):
+    if on:
+        idx = load_module("module-loopback", f"source={st.get('default_src') or '@DEFAULT_SOURCE@'}",
+                          "latency_msec=40", "source_dont_move=true",
+                          "sink_input_properties=media.name=Irminsul-Hear-Yourself")
+        if idx is None:
+            return "Loopback failed"
+        rt["loop_mod"] = idx
+        return "You can hear yourself now (mind the feedback)"
+    unload_module(rt.pop("loop_mod", None))
+    return "Loopback off"
+
+
+def set_clock(key, value):
+    run(["pw-metadata", "-n", "settings", "0", key, str(value)])
+
+
+# ───────────────────────────── equalizer engine (PipeWire filter-chain) ─────────────────────────────
+def eq_conf(gains, preamp, q, target):
+    nodes = [f'{{ type = builtin name = preamp label = bq_highshelf control = {{ "Freq" = 0.0 "Q" = 1.0 "Gain" = {preamp:.2f} }} }}']
+    for i, (f, g) in enumerate(zip(EQ_FREQS, gains)):
+        lab = "bq_lowshelf" if i == 0 else "bq_highshelf" if i == 9 else "bq_peaking"
+        nodes.append(f'{{ type = builtin name = eq_band_{i + 1} label = {lab} control = {{ "Freq" = {f:.1f} "Q" = {q:.2f} "Gain" = {g:.2f} }} }}')
+    names = ["preamp"] + [f"eq_band_{i + 1}" for i in range(10)]
+    links = [f'{{ output = "{a}:Out" input = "{b}:In" }}' for a, b in zip(names, names[1:])]
+    tgt = f'target.object = "{target}"' if target else ""
+    return f"""# generated by irminsul-settings
+context.properties = {{ log.level = 0 }}
+context.spa-libs = {{ audio.convert.* = audioconvert/libspa-audioconvert  support.* = support/libspa-support }}
+context.modules = [
+  {{ name = libpipewire-module-rt args = {{ nice.level = -11 }} flags = [ ifexists nofail ] }}
+  {{ name = libpipewire-module-protocol-native }}
+  {{ name = libpipewire-module-client-node }}
+  {{ name = libpipewire-module-adapter }}
+  {{ name = libpipewire-module-filter-chain
+    args = {{
+      node.description = "Irminsul Equalizer"
+      media.name = "Irminsul Equalizer"
+      filter.graph = {{
+        nodes = [
+          {chr(10).join('          ' + n for n in nodes).lstrip()}
+        ]
+        links = [
+          {chr(10).join('          ' + l for l in links).lstrip()}
+        ]
+      }}
+      audio.channels = 2
+      audio.position = [ FL FR ]
+      capture.props = {{ node.name = "effect_input.irminsul_eq" media.class = Audio/Sink }}
+      playback.props = {{ node.name = "effect_output.irminsul_eq" node.passive = true {tgt} }}
+    }}
+  }}
+]
+"""
+
+
+class EQEngine:
+    def __init__(self, rt):
+        self.rt = rt; self.node = None; self.restart_at = 0
+
+    def running(self):
+        if DEMO:
+            return self.rt.get("eq_pid") is not None
+        pid = self.rt.get("eq_pid")
+        if not pid:
+            return False
+        try:
+            with open(f"/proc/{pid}/cmdline", "rb") as f:
+                return b"irminsul-eq" in f.read()
+        except Exception:
+            return False
+
+    def start(self, eq, st):
+        target = eq.get("target") or ""
+        if not target or target.startswith("effect_input") or target.startswith("irminsul"):
+            cur = st.get("default_sink", "")
+            target = cur if cur and not cur.startswith("effect_input") else (hw_sinks(st)[0]["name"] if hw_sinks(st) else "")
+        self.stop(st, restore=False)
+        if DEMO:
+            self.rt["eq_pid"] = 1; return "Equalizer awakened"
+        try:
+            os.makedirs(CFG_DIR, exist_ok=True)
+            with open(EQ_CONF, "w") as f:
+                f.write(eq_conf(eq["gains"], eq["preamp"], eq["q"], target))
+            p = subprocess.Popen(["pipewire", "-c", EQ_CONF], start_new_session=True, env=clean_env(),
+                                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        except FileNotFoundError:
+            return "pipewire binary not found: the EQ needs PipeWire"
+        except Exception as e:
+            return f"EQ failed: {e}"
+        self.rt["eq_pid"], self.rt["eq_target"] = p.pid, target; self.node = None
+        for _ in range(20):
+            time.sleep(0.15)
+            if "effect_input.irminsul_eq" in sh("pactl", "list", "short", "sinks"):
+                break
+        run(["pactl", "set-default-sink", "effect_input.irminsul_eq"]); move_all(st, "effect_input.irminsul_eq")
+        return "Equalizer awakened"
+
+    def stop(self, st, restore=True):
+        pid = self.rt.pop("eq_pid", None); tgt = self.rt.pop("eq_target", None); self.node = None
+        if pid and not DEMO:
+            try:
+                with open(f"/proc/{pid}/cmdline", "rb") as f:
+                    if b"irminsul-eq" in f.read():
+                        os.kill(pid, signal.SIGTERM)
+            except Exception:
+                pass
+        if restore and tgt:
+            time.sleep(0.3); run(["pactl", "set-default-sink", tgt])
+        return "Equalizer resting"
+
+    def _node_id(self):
+        if self.node:
+            return self.node
+        try:
+            for o in json.loads(sh("pw-dump", timeout=4) or "[]"):
+                if o.get("type") == "PipeWire:Interface:Node" and \
+                        ((o.get("info") or {}).get("props") or {}).get("node.name") == "effect_input.irminsul_eq":
+                    self.node = o["id"]; return self.node
+        except Exception:
+            pass
+        return None
+
+    def update(self, eq, st):
+        """Push new gains/Q live; fall back to a quick restart of the chain."""
+        if DEMO or not self.running():
+            return
+        nid = self._node_id()
+        params = [f'"preamp:Gain" {eq["preamp"]:.2f}']
+        for i, g in enumerate(eq["gains"]):
+            params += [f'"eq_band_{i + 1}:Gain" {g:.2f}', f'"eq_band_{i + 1}:Q" {eq["q"]:.2f}']
+        if nid is None or not run(["pw-cli", "set-param", str(nid), "Props", "{ params = [ " + " ".join(params) + " ] }"]):
+            self.start(eq, st)
+        else:
+            try:
+                with open(EQ_CONF, "w") as f:
+                    f.write(eq_conf(eq["gains"], eq["preamp"], eq["q"], self.rt.get("eq_target", "")))
+            except Exception:
+                pass
+
+
+def eq_response(gains, preamp, q, n=180, fs=48000.0):
+    """True magnitude response (dB) of the biquad cascade, sampled log-spaced 20 Hz..20 kHz."""
+    coefs = []
+    for i, (f0, g) in enumerate(zip(EQ_FREQS, gains)):
+        if abs(g) < 0.01:
+            continue
+        Aa = 10 ** (g / 40); w0 = 2 * math.pi * f0 / fs; cw, sw = math.cos(w0), math.sin(w0); al = sw / (2 * q)
+        if i == 0:
+            sa = 2 * math.sqrt(Aa) * al
+            b = (Aa * ((Aa + 1) - (Aa - 1) * cw + sa), 2 * Aa * ((Aa - 1) - (Aa + 1) * cw), Aa * ((Aa + 1) - (Aa - 1) * cw - sa))
+            a = ((Aa + 1) + (Aa - 1) * cw + sa, -2 * ((Aa - 1) + (Aa + 1) * cw), (Aa + 1) + (Aa - 1) * cw - sa)
+        elif i == 9:
+            sa = 2 * math.sqrt(Aa) * al
+            b = (Aa * ((Aa + 1) + (Aa - 1) * cw + sa), -2 * Aa * ((Aa - 1) + (Aa + 1) * cw), Aa * ((Aa + 1) + (Aa - 1) * cw - sa))
+            a = ((Aa + 1) - (Aa - 1) * cw + sa, 2 * ((Aa - 1) - (Aa + 1) * cw), (Aa + 1) - (Aa - 1) * cw - sa)
+        else:
+            b = (1 + al * Aa, -2 * cw, 1 - al * Aa); a = (1 + al / Aa, -2 * cw, 1 - al / Aa)
+        coefs.append((b, a))
+    out = []
+    for k in range(n):
+        f = 20 * (1000 ** (k / (n - 1)))
+        z = cmath.exp(-1j * 2 * math.pi * f / fs); z2 = z * z; h = 1
+        for b, a in coefs:
+            h *= (b[0] + b[1] * z + b[2] * z2) / (a[0] + a[1] * z + a[2] * z2)
+        out.append(20 * math.log10(max(1e-9, abs(h))) + preamp)
+    return out
+
+
+# ───────────────────────────── analyzer (real spectrum of what is playing) ─────────────────────────────
+class Analyzer(threading.Thread):
+    N, RATE, BLOCK = 24, 16000, 512
+
+    def __init__(self):
+        super().__init__(daemon=True)
+        self.want = False; self.target = "out"; self.stop = False; self.proc = None; self.bands_on = False; self._n = 0
+        self.L = [0.0] * self.N; self.R = [0.0] * self.N; self.lv = [0.0, 0.0]; self.peak_db = -90.0
+        self.freqs = [50 * (7000 / 50) ** (i / (self.N - 1)) for i in range(self.N)]
+        self.coef = [2 * math.cos(2 * math.pi * f / self.RATE) for f in self.freqs]
+        self.win = [0.5 - 0.5 * math.cos(2 * math.pi * i / (self.BLOCK - 1)) for i in range(self.BLOCK)]
+        if np is not None:
+            self.np_win = np.hanning(self.BLOCK)
+            bins = np.fft.rfftfreq(self.BLOCK, 1 / self.RATE)
+            self.np_idx = [int(np.argmin(np.abs(bins - f))) for f in self.freqs]
+        self.t = 0.0
+
+    def _bands(self, xs):
+        if np is not None:
+            a = np.asarray(xs, dtype=np.float64) * self.np_win
+            mag = np.abs(np.fft.rfft(a)) / (self.BLOCK / 4)
+            out = []
+            for k, i in enumerate(self.np_idx):
+                m = float(mag[max(0, i - 1):i + 2].max())
+                out.append(m)
+        else:
+            w = [x * h for x, h in zip(xs, self.win)]
+            out = []
+            for c in self.coef:
+                s1 = s2 = 0.0
+                for x in w:
+                    s = x + c * s1 - s2; s2 = s1; s1 = s
+                out.append(math.sqrt(max(0.0, s1 * s1 + s2 * s2 - c * s1 * s2)) / (self.BLOCK / 4))
+        return [max(0.0, min(1.0, (20 * math.log10(m + 1e-9) + 66) / 62)) for m in out]
+
+    def _demo(self):
+        self.t += 0.05; t = self.t
+        for side, arr in ((0, self.L), (1, self.R)):
+            for i in range(self.N):
+                base = 0.75 - i / self.N * 0.45
+                beat = 0.25 * max(0, math.sin(t * 4.1 + side)) * (1 if i < 6 else 0.3)
+                arr[i] = max(0.0, min(1.0, base * (0.6 + 0.4 * math.sin(t * 1.7 + i * 0.55 + side * 0.8)) + beat))
+        self.lv = [0.62 + 0.2 * math.sin(t * 3), 0.58 + 0.2 * math.sin(t * 2.6 + 1)]
+        self.peak_db = -7.5 + 3 * math.sin(t)
+
+    def run(self):
+        while not self.stop:
+            if not self.want:
+                time.sleep(0.15); continue
+            if DEMO:
+                self._demo(); time.sleep(0.05); continue
+            tgt = self.target
+            dev = (sh("pactl", "get-default-sink").strip() + ".monitor") if tgt == "out" else \
+                (sh("pactl", "get-default-source").strip() if tgt == "mic" else tgt)
+            try:
+                self.proc = subprocess.Popen(["parec", "-d", dev, "--format=s16le", f"--rate={self.RATE}", "--channels=2",
+                                              "--latency-msec=25", "--client-name=irminsul-astrolabe"],
+                                             stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
+                while self.want and not self.stop and self.target == tgt:
+                    data = self.proc.stdout.read(self.BLOCK * 4)
+                    if not data or len(data) < self.BLOCK * 4:
+                        break
+                    self._n += 1
+                    if np is not None:
+                        a = np.frombuffer(data, dtype=np.int16).astype(np.float64) / 32768.0
+                        l, r = a[0::2], a[1::2]
+                        if self.bands_on:
+                            self.L, self.R = self._bands(l), self._bands(r)
+                        pk = max(float(np.abs(l).max()), float(np.abs(r).max()), 1e-6)
+                        self.peak_db = 20 * math.log10(pk)
+                        self.lv = [min(1.0, float(np.sqrt(np.mean(ch * ch))) ** 0.6 * 2.2) for ch in (l, r)]
+                    else:
+                        arr = array.array("h"); arr.frombytes(data)
+                        l = [v / 32768.0 for v in arr[0::2]]; r = [v / 32768.0 for v in arr[1::2]]
+                        if self.bands_on and self._n % 2 == 0:      # pure-python Goertzel is heavy: every 2nd block
+                            self.L, self.R = self._bands(l), self._bands(r)
+                        pk = max(max(map(abs, l)), max(map(abs, r)), 1e-6)
+                        self.peak_db = 20 * math.log10(pk)
+                        self.lv = [min(1.0, math.sqrt(sum(x * x for x in ch) / len(ch)) ** 0.6 * 2.2) for ch in (l, r)]
+            except FileNotFoundError:
+                return
+            except Exception:
+                pass
+            self.kill()
+            self.L = [0.0] * self.N; self.R = [0.0] * self.N; self.lv = [0.0, 0.0]; self.peak_db = -90.0
+            time.sleep(0.2)
+
+    def kill(self):
+        try:
+            self.proc.terminate()
+        except Exception:
+            pass
+
+    def close(self):
+        self.stop = True; self.kill()
+
+
+# ───────────────────────────── test sounds ─────────────────────────────
+def _play(frames, rate, channels, device=None):
+    pcm = array.array("h", [int(max(-1, min(1, v)) * 32000) for v in frames]).tobytes()
+    cmd = ["paplay", "--raw", f"--rate={rate}", f"--channels={channels}", "--format=s16le",
+           "--client-name=irminsul-trial", "--stream-name=Irminsul trial"]
+    if device:
+        cmd.append(f"--device={device}")
+    if DEMO:
+        return
+    try:
+        subprocess.run(cmd, input=pcm, timeout=12)
+    except Exception:
+        pass
+
+
+def play_channel(side, device=None):
+    """Wind-chime arpeggio on the left, right or both speakers."""
+    rate, n = 44100, int(44100 * 1.4); out = [0.0] * (n * 2)
+    for k, f in enumerate((659.25, 783.99, 987.77, 1318.51)):
+        off = int(rate * 0.1 * k)
+        for i in range(n - off):
+            t = i / rate; v = min(1.0, t * 90) * math.exp(-t * 3.8) * (math.sin(2 * math.pi * f * t) + 0.25 * math.sin(4 * math.pi * f * t)) * 0.2
+            j = (off + i) * 2
+            if side in ("left", "both"):
+                out[j] += v
+            if side in ("right", "both"):
+                out[j + 1] += v
+    _play(out, rate, 2, device)
+
+
+def play_sweep(device=None):
+    rate, dur = 44100, 6.0; n = int(rate * dur); f0, f1 = 20.0, 20000.0; k = math.log(f1 / f0)
+    out = []
+    for i in range(n):
+        t = i / rate; ph = 2 * math.pi * f0 * dur / k * (math.exp(t / dur * k) - 1)
+        env = min(1.0, t * 20, (dur - t) * 20)
+        out.append(math.sin(ph) * 0.22 * env)
+    _play(out, rate, 1, device)
+
+
+def play_pink(device=None):
+    rate, n = 44100, 44100 * 3; b = [0.0] * 7; out = []; rnd = random.Random(3)
+    for i in range(n):
+        w = rnd.uniform(-1, 1)
+        b[0] = 0.99886 * b[0] + w * 0.0555179; b[1] = 0.99332 * b[1] + w * 0.0750759
+        b[2] = 0.96900 * b[2] + w * 0.1538520; b[3] = 0.86650 * b[3] + w * 0.3104856
+        b[4] = 0.55000 * b[4] + w * 0.5329522; b[5] = -0.7616 * b[5] - w * 0.0168980
+        v = sum(b[:6]) + b[6] + w * 0.5362; b[6] = w * 0.115926
+        env = min(1.0, i / 2000, (n - i) / 2000)
+        out.append(v * 0.05 * env)
+    _play(out, rate, 1, device)
+
+
+def play_tone(freq, device=None):
+    rate, n = 44100, int(44100 * 2.0)
+    _play([math.sin(2 * math.pi * freq * i / rate) * 0.25 * min(1.0, i / 800, (n - i) / 800) for i in range(n)], rate, 1, device)
+
+
+# ───────────────────────────── Night Watch worker (detached process) ─────────────────────────────
+def night_curve(curve, f):
+    f = max(0.0, min(1.0, f))
+    return 1 - f if curve == 0 else (1 - f) ** 2 if curve == 1 else (1.0 if f < 0.65 else 1 - (f - 0.65) / 0.35)
+
+
+def night_watch(minutes, curve, action):
+    st = snapshot(); sink = st.get("default_sink") or "@DEFAULT_SINK@"
+    v0 = next((s["vol"] for s in st["sinks"] if s["name"] == sink), 50)
+    dur = max(1.0, minutes * 60); start = time.time()
+    rt = load_rt(); rt["night"] = dict(pid=os.getpid(), start=start, dur=dur, v0=v0, action=action, curve=curve); save_rt(rt)
+    stop = {"x": False}
+    signal.signal(signal.SIGTERM, lambda *_: stop.update(x=True))
+    while not stop["x"]:
+        f = (time.time() - start) / dur
+        run(["pactl", "set-sink-volume", sink, f"{int(v0 * night_curve(curve, f))}%"])
+        if f >= 1:
+            break
+        time.sleep(3)
+    if not stop["x"]:
+        if action in (1, 2):
+            run(["playerctl", "-a", "pause"])
+        if action in (0, 2):
+            run(["pactl", "set-sink-mute", sink, "1"])
+    run(["pactl", "set-sink-volume", sink, f"{v0}%"])
+    rt = load_rt(); rt.pop("night", None); save_rt(rt)
+
+
+def restore_all():
+    """Re-apply everything that lives in the server and is lost on restart / reboot."""
+    cfg, rt, st = load_cfg(), load_rt(), snapshot()
+    rt.pop("coop_sel", None); rt.pop("coop_sync", None)
+    if cfg["force_rate"]:
+        set_clock("clock.force-rate", cfg["force_rate"])
+    if cfg["force_quantum"]:
+        set_clock("clock.force-quantum", cfg["force_quantum"])
+    if cfg["allowed_rates"]:
+        set_clock("clock.allowed-rates", cfg["allowed_rates"])
+    for key, fn, mk in (("mono", mode_mono, "mono_mod"), ("coop", mode_coop, "coop_mod"),
+                        ("clear_voice", mode_clear_voice, "clear_mod")):
+        if cfg[key] and not mod_alive(st, rt.get(mk)):
+            rt.pop(mk, None); print(fn(True, rt, st)); st = snapshot()
+    if cfg["eq"]["enabled"]:
+        eng = EQEngine(rt)
+        if not eng.running():
+            print(eng.start(cfg["eq"], st))
+    save_rt(rt)
+
+
+# ───────────────────────────── demo data ─────────────────────────────
+_DEMO = None
+
+
+def demo_state():
+    global _DEMO
+    if _DEMO is None:
+        st = lambda ch: [(c, v) for c, v in ch]
+        sinks = [
+            dict(name="alsa_output.pci-0000_00_1f.3.analog-stereo", idx=48, desc="Built-in Audio Analog Stereo",
+                 ch=st([("front-left", 64), ("front-right", 64)]), vol=64, bal=0, mute=False, state="Running",
+                 ports=[("analog-output-speaker", "Speakers", "available"), ("analog-output-headphones", "Headphones", "not available")],
+                 port="analog-output-speaker", spec="s32le 2ch 48000Hz", kind="speaker", api="alsa", virtual=False),
+            dict(name="bluez_output.AC_80_0A_11_22_33.1", idx=77, desc="Sony WH-1000XM5", ch=st([("front-left", 41), ("front-right", 45)]),
+                 vol=45, bal=9, mute=False, state="Idle", ports=[("headphone-output", "Headphone", "available")],
+                 port="headphone-output", spec="s16le 2ch 48000Hz", kind="headphones", api="bluez5", virtual=False),
+            dict(name="alsa_output.pci-0000_01_00.1.hdmi-stereo", idx=52, desc="LG UltraGear HDMI", ch=st([("front-left", 100), ("front-right", 100)]),
+                 vol=100, bal=0, mute=True, state="Suspended", ports=[("hdmi-output-0", "HDMI / DisplayPort", "available")],
+                 port="hdmi-output-0", spec="s32le 2ch 48000Hz", kind="monitor", api="alsa", virtual=False),
+        ]
+        srcs = [dict(name="alsa_input.usb-Blue_Yeti-00.analog-stereo", idx=60, desc="Blue Yeti", ch=st([("front-left", 72), ("front-right", 72)]),
+                     vol=72, bal=0, mute=False, state="Running", ports=[("analog-input-mic", "Microphone", "available")],
+                     port="analog-input-mic", spec="s16le 2ch 48000Hz", kind="speaker", api="alsa", virtual=False)]
+        cards = [dict(name="alsa_card.pci-0000_00_1f.3", idx=1, desc="Built-in Audio",
+                      profiles=[("output:analog-stereo+input:analog-stereo", "Analog Stereo Duplex", True),
+                                ("output:analog-surround-51", "Analog Surround 5.1 Output", True), ("off", "Off", True)],
+                      active="output:analog-stereo+input:analog-stereo", bluez=False),
+                 dict(name="bluez_card.AC_80_0A_11_22_33", idx=9, desc="Sony WH-1000XM5",
+                      profiles=[("a2dp-sink", "High Fidelity Playback (A2DP Sink)", True),
+                                ("headset-head-unit", "Headset Head Unit (HSP/HFP)", True), ("off", "Off", True)],
+                      active="a2dp-sink", bluez=True)]
+        apps = [dict(idx=201, name="Spotify", media="Genshin Impact - Liyue", icons=["spotify"], ch=st([("front-left", 80), ("front-right", 80)]),
+                     vol=80, bal=0, mute=False, sink=48, corked=False),
+                dict(idx=207, name="Firefox", media="YouTube", icons=["firefox"], ch=st([("front-left", 100), ("front-right", 70)]),
+                     vol=100, bal=30, mute=False, sink=48, corked=True),
+                dict(idx=213, name="Discord", media="Voice", icons=["discord"], ch=st([("front-left", 120), ("front-right", 120)]),
+                     vol=120, bal=0, mute=False, sink=77, corked=False)]
+        recs = [dict(idx=301, name="Discord", media="Voice capture", src=60)]
+        mods = [dict(idx=i, name=n, arg=a) for i, n, a in (
+            (536870912, "module-always-sink", ""), (536870913, "module-device-manager", ""),
+            (536870914, "module-x11-bell", "sample=bell.ogg"), (537, "module-loopback", "source=alsa_input... latency_msec=40"))]
+        info = {"server_name": "PulseAudio (on PipeWire 1.2.7)", "server_version": "15.0.0",
+                "default_sample_specification": "float32le 2ch 48000Hz", "default_channel_map": "front-left,front-right"}
+        _DEMO = dict(sinks=sinks, srcs=srcs, cards=cards, apps=apps, recs=recs, mods=mods, info=info,
+                     default_sink=sinks[0]["name"], default_src=srcs[0]["name"],
+                     clock={"clock.rate": "48000", "clock.quantum": "1024", "clock.allowed-rates": "[ 48000 ]",
+                            "clock.force-rate": "0", "clock.force-quantum": "256"})
+    return json.loads(json.dumps(_DEMO))
+
+
+# ───────────────────────────── the archive (immediate-mode scene) ─────────────────────────────
+NAV = [
+    ("outputs", "Outputs", "Speakers & headphones", "speaker", 1),
+    ("inputs", "Inputs", "Microphones & voice", "mic", 2),
+    ("streams", "Party", "Per-app routing", "party", 0),
+    ("profiles", "Profiles", "Cards & Bluetooth codecs", "card", 3),
+    ("eq", "Equalizer", "Ten elemental bands", "eq", 4),
+    ("astro", "Astrolabe", "Spectrum & speaker trial", "astro", 5),
+    ("engine", "Engine", "Sample rate & latency", "engine", 6),
+    ("mixer", "Mixer", "How the popup behaves", "gear", -1),
+    ("night", "Night Watch", "Sleep timer & fade-out", "moon", 3),
+]
+PAGE_IDS = [n[0] for n in NAV]
+PAGE_INFO = {
+    "outputs": "Every speaker, headset and screen that can sing. Push past 100 % when a quiet video needs it, "
+               "fix a lopsided headset with the balance, fold stereo into mono, or let every device play together.",
+    "inputs": "Your voice, before anyone hears it. Boost a shy microphone, filter noise and echo with WebRTC, "
+              "and listen to yourself to check how you sound.",
+    "streams": "Each app in your party gets its own volume, balance and destination. Send music to the headset "
+               "and the game to the speakers. Banish a stream that refuses to be quiet.",
+    "profiles": "How each sound card talks: stereo or surround, HDMI or analog. For Bluetooth, choose between "
+                "high-fidelity playback and headset mode, and pick the codec (LDAC, aptX, AAC, SBC).",
+    "eq": "A real ten-band equalizer running inside PipeWire. Drag the stars, pick an elemental preset, and "
+          "the curve you see is the exact response you hear.",
+    "astro": "The Astrolabe listens to what is playing: left channel on the left half, right on the right, "
+             "low notes at the top. Use the trials to check wiring, phase and dead frequencies.",
+    "engine": "The heart of PipeWire. A fixed sample rate stops resampling, a smaller quantum lowers latency "
+              "for music and games, a larger one saves power. Changes apply instantly.",
+    "mixer": "Shape the Resonance Mixer popup: where it opens, how far each scroll moves, the safe ceiling, "
+             "which sections it shows, and your four quick presets.",
+    "night": "Fall asleep to music without waking up to it. The watch fades the volume along a curve, then "
+             "pauses your players and puts the volume back for the morning.",
+}
+RATES = [0, 44100, 48000, 88200, 96000, 192000]
+QUANTA = [0, 32, 64, 128, 256, 512, 1024, 2048]
+ALLOWED = [("", "Leave it to WirePlumber"), ("[ 48000 ]", "48 kHz only"), ("[ 44100 48000 ]", "44.1 and 48 kHz"),
+           ("[ 44100 48000 88200 96000 ]", "Up to 96 kHz"), ("[ 44100 48000 88200 96000 176400 192000 ]", "Up to 192 kHz")]
+Q_OPTS = [("Narrow", 1.41), ("Balanced", 1.0), ("Wide", 0.7)]
+TONES = [55, 110, 220, 440, 1000, 2000, 4000, 8000, 12000, 16000]
+NIGHT_MIN = [10, 15, 20, 30, 45, 60, 90, 120]
+NIGHT_CURVE = ["Linear", "Gentle", "Lullaby (late fade)"]
+NIGHT_END = ["Mute the output", "Pause players", "Pause players and mute"]
+PRESET_NAMES = ["Serenitea", "Adventure", "Domain", "Burst", "Teapot", "Mondstadt", "Liyue", "Inazuma", "Sumeru",
+                "Fontaine", "Natlan", "Abyss", "Focus", "Night", "Party", "Celestia"]
+SMOOTH = [("Swift", 7.0), ("Balanced", 3.0), ("Dreamy", 1.2)]
+
+
+def fmt_pct(v):
+    return f"{int(round(v))}%"
+
+
+def fmt_bal(v):
+    v = int(round(v))
+    return "Centre" if v == 0 else f"L {-v}" if v < 0 else f"R {v}"
+
+
+def fmt_db(v):
+    return f"{v:+.1f} dB" if abs(v) >= 0.05 else "0 dB"
+
+
+class Scene:
+    def __init__(self, host, page="outputs"):
+        self.host = host
+        self.cfg, self.rt = load_cfg(), load_rt()
+        self.st = dict(sinks=[], srcs=[], cards=[], apps=[], recs=[], mods=[], info={}, default_sink="",
+                       default_src="", clock={})
+        self.page = page if page in PAGE_IDS else "outputs"
+        self.scroll, self.scroll_s, self.content_h = {}, {}, {}
+        self.hits, self.mx, self.my, self.active = [], -1, -1, None
+        self.t = self.page_t = 0.0; self.dt = 0.033; self.nav_y = None; self.last_input = time.monotonic()
+        self.info, self._info = None, None
+        self.toast_msg, self.toast_t = "", -10.0
+        self.dialog, self.dialog_t, self.modal = None, 0.0, False
+        self.hold, self.pending, self.last_flush = {}, {}, 0.0
+        self.anim, self.flashes, self.codecs, self.busy = {}, {}, {}, set()
+        self.eq = EQEngine(self.rt); self.eq_resp, self.eq_sig = None, None
+        self.eq_dirty, self.eq_push_at, self.cfg_dirty_at = False, 0.0, 0.0
+        self.coop_due = 0.0
+        self.an = Analyzer(); self.an.start()
+        n = Analyzer.N
+        self.sp, self.pk, self.lv = [[0.0] * n, [0.0] * n], [[0.0] * n, [0.0] * n], [0.0, 0.0]
+        self.tone_i, self.test_dev, self.rt_read = 3, 0, 0.0
+        self.refreshing = False; self.refresh_due = 0.0; self.clock_due = 0.0
+        self.clip = (0, 0, 99999, 99999)
+        self.refresh()
+
+    # ── state ──
+    def refresh(self):
+        if self.refreshing:
+            self.refresh_again = True   # a snapshot is already running; it may predate the change, so go again
+            return
+        self.refreshing = True; self.refresh_again = False
+        POOL.submit(lambda: self.host.idle(lambda st=snapshot(): self.apply(st)))
+
+    def apply(self, st):
+        self.refreshing = False; self.st = st
+        if getattr(self, "refresh_again", False):
+            self.refresh_again = False; self.refresh_due = self.t + 0.05
+        if not self.cfg_dirty_at and "coop" not in self.busy and not self.coop_due and not DEMO:
+            saved = load_cfg()
+            for key in ("coop", "coop_devices", "coop_sync"):
+                self.cfg[key] = saved[key]
+            latest = load_rt()
+            for key in list(self.rt):
+                if key.startswith("coop_"):
+                    self.rt.pop(key, None)
+            self.rt.update({k: v for k, v in latest.items() if k.startswith("coop_")})
+        for c in st["cards"]:
+            if c["bluez"] and c["name"] not in self.codecs:
+                self.codecs[c["name"]] = None
+                POOL.submit(lambda n=c["name"]: self.host.idle(lambda r=bt_codecs(n): self.codecs.__setitem__(n, r)))
+
+    def on_event(self):
+        self.refresh_due = self.t + 0.09
+
+    def alive(self, mk):
+        if mk == "coop_mod" and not DEMO:
+            return bool(coop_module(self.st))
+        return (mk in self.rt) if DEMO else mod_alive(self.st, self.rt.get(mk))
+
+    def hv(self, key, real):
+        h = self.hold.get(key)
+        return h[0] if h and (DEMO or time.monotonic() < h[1]) else real
+
+    def sethold(self, key, v, secs=0.9):
+        self.hold[key] = (v, time.monotonic() + secs)
+
+    def queue(self, key, cmd):
+        self.pending[key] = cmd
+
+    def do(self, cmd, msg=None, refresh=True):
+        def job():
+            ok = run(cmd)
+            self.host.idle(lambda: (self.toast(msg if ok else "The server said no") if msg else None,
+                                    self.on_event() if refresh else None))
+        COMMANDS.submit(job)
+
+    toast_t_wall = -100.0
+
+    def toast(self, msg):
+        self.toast_msg, self.toast_t = msg, self.t; self.toast_t_wall = time.monotonic()
+
+    def save(self):
+        self.cfg_dirty_at = self.t + 0.4
+
+    def goto(self, page):
+        if page != self.page:
+            self.page, self.page_t = page, 0.0
+
+    def ask(self, title, msg, ok, on_ok):
+        self.dialog = dict(title=title, msg=msg, ok=ok, on_ok=on_ok); self.dialog_t = self.t
+
+    # ── input ──
+    def _top(self, x, y, need=None):
+        for h in reversed(self.hits):
+            if self.dialog and not h.get("modal"):
+                continue
+            rx, ry, rw, rh = h["r"]
+            if rx <= x < rx + rw and ry <= y < ry + rh and (need is None or need in h):
+                return h
+        return None
+
+    def on_motion(self, x, y):
+        self.mx, self.my = x, y; self.last_input = time.monotonic()
+        if self.active and "drag" in self.active:
+            self.active["drag"](x, y)
+
+    def on_leave(self):
+        if not self.active:
+            self.mx = self.my = -1
+
+    def on_press(self, x, y, button=1):
+        self.mx, self.my = x, y; self.last_input = time.monotonic()
+        h = self._top(x, y)
+        if not h:
+            if self.dialog:
+                self.dialog = None
+            return None
+        if button == 3:
+            if "alt" in h:
+                h["alt"]()
+            return None
+        if button != 1:
+            return None
+        if "press" in h:
+            h["press"](x, y)
+        if "drag" in h:
+            self.active = h
+        return h.get("ret")
+
+    def on_release(self, x, y):
+        if self.active and "release" in self.active:
+            self.active["release"]()
+        self.active = None
+
+    def on_scroll(self, x, y, dy):
+        self.last_input = time.monotonic()
+        h = self._top(x, y, "scroll")
+        if h:
+            h["scroll"](-1 if dy > 0 else 1); return
+        if not self.dialog:
+            cx, cy, cw, ch = self.view
+            if cx <= x < cx + cw and cy <= y < cy + ch:
+                self.scroll[self.page] = self.scroll.get(self.page, 0) + dy * 60
+
+    def on_key(self, k):
+        self.last_input = time.monotonic()
+        if k == "Escape":
+            if self.dialog:
+                self.dialog = None
+            else:
+                self.host.close()
+        elif k in ("Return", "KP_Enter") and self.dialog:
+            d = self.dialog; self.dialog = None; d["on_ok"]()
+        elif k in ("Page_Down", "Next"):
+            self.scroll[self.page] = self.scroll.get(self.page, 0) + 300
+        elif k in ("Page_Up", "Prior"):
+            self.scroll[self.page] = self.scroll.get(self.page, 0) - 300
+        elif k in ("Tab", "Down") and not self.dialog:
+            self.goto(PAGE_IDS[(PAGE_IDS.index(self.page) + 1) % len(PAGE_IDS)])
+        elif k in ("ISO_Left_Tab", "Up") and not self.dialog:
+            self.goto(PAGE_IDS[(PAGE_IDS.index(self.page) - 1) % len(PAGE_IDS)])
+        elif len(k) == 1 and k.isdigit() and 1 <= int(k) <= len(PAGE_IDS):
+            self.goto(PAGE_IDS[int(k) - 1])
+
+    # ── per-frame ──
+    def tick(self, dt):
+        self.dt = dt; self.t += dt; self.page_t += dt
+        now = time.monotonic()
+        if self.pending and now - self.last_flush > 0.045:
+            for cmd in self.pending.values():
+                COMMANDS.submit(run, cmd)
+            self.pending.clear(); self.last_flush = now
+        if self.refresh_due and self.t >= self.refresh_due:
+            self.refresh_due = 0.0; self.refresh()
+        if self.page == "engine" and self.t >= self.clock_due:
+            self.clock_due = self.t + 2.5
+            POOL.submit(lambda: self.host.idle(lambda c=clock_settings(): self.st.__setitem__("clock", c) if not DEMO else None))
+        if self.cfg_dirty_at and self.t >= self.cfg_dirty_at:
+            self.cfg_dirty_at = 0.0; save_cfg(self.cfg)
+        if self.coop_due and self.t >= self.coop_due and "coop" not in self.busy:
+            self.coop_due = 0.0; self.coop_rebuild()
+        if self.eq_dirty and self.t >= self.eq_push_at:
+            self.eq_dirty = False; eq = json.loads(json.dumps(self.cfg["eq"])); st = self.st
+            POOL.submit(lambda: self.eq.update(eq, st))
+        if self.t - self.rt_read > 1.0 and self.page == "night" and not DEMO:
+            self.rt_read = self.t; night = load_rt().get("night")
+            if night:
+                self.rt["night"] = night
+            else:
+                self.rt.pop("night", None)
+        # analyzer follows the page
+        self.an.want = True
+        self.an.bands_on = self.page == "astro"
+        self.an.target = "mic" if self.page == "inputs" else ("mic" if self.page == "astro" and self.cfg["astro"]["source"] == "mic" else "out")
+        decay = SMOOTH[self.cfg["astro"]["smooth"]][1]
+        for s in (0, 1):
+            src = self.an.L if s == 0 else self.an.R
+            for i in range(Analyzer.N):
+                v = src[i]; cur = self.sp[s][i]
+                self.sp[s][i] = v if v > cur else max(v, cur - dt * decay * 0.25)
+                self.pk[s][i] = max(self.sp[s][i], self.pk[s][i] - dt * 0.32)
+            self.lv[s] += (self.an.lv[s] - self.lv[s]) * min(1.0, dt * 16)
+        sc = self.scroll.get(self.page, 0)
+        mx = max(0, self.content_h.get(self.page, 0) - getattr(self, "view", (0, 0, 0, 500))[3] + 24)
+        sc = max(0, min(mx, sc)); self.scroll[self.page] = sc
+        cur = self.scroll_s.get(self.page, 0)
+        self.scroll_s[self.page] = cur + (sc - cur) * min(1.0, dt * 14)
+
+    def close(self):
+        self.an.close()
+        for cmd in self.pending.values():
+            COMMANDS.submit(run, cmd)
+        self.pending.clear()
+        if self.cfg_dirty_at:
+            save_cfg(self.cfg)
+        save_rt(self.rt)
+
+    # ── primitive widgets ──
+    def over(self, x, y, w, h):
+        if self.dialog and not self.modal:
+            return False
+        cx, cy, cw, ch = self.clip
+        return x <= self.mx < x + w and y <= self.my < y + h and cx <= self.mx < cx + cw and cy <= self.my < cy + ch
+
+    def hit(self, id, x, y, w, h, **kw):
+        cx, cy, cw, ch = self.clip
+        x0, y0, x1, y1 = max(x, cx), max(y, cy), min(x + w, cx + cw), min(y + h, cy + ch)
+        if x1 <= x0 or y1 <= y0:
+            return
+        if self.modal:
+            kw["modal"] = True
+        self.hits.append(dict(id=id, r=(x0, y0, x1 - x0, y1 - y0), **kw))
+
+    def is_active(self, id):
+        return bool(self.active) and self.active["id"] == id
+
+    def lerp_anim(self, id, target, speed=14):
+        a = self.anim.get(id, target); a += (target - a) * min(1.0, self.dt * speed); self.anim[id] = a
+        return a
+
+    def section(self, y, title, right=""):
+        cr, x, w = self.cr, self.CX0, self.RW
+        y += 16; cy = y + 12
+        diamond(cr, x + 7, cy, 5); A(cr, GOLD); cr.fill()
+        diamond(cr, x + 7, cy, 2); A(cr, DEEP); cr.fill()
+        tw = text(cr, title, x + 22, cy, 17, GOLD_HI, bold=True)
+        rw = text(cr, right, x + w, cy, 13, IVORY, 0.55, anchor="r", width=w * 0.45) if right else 0
+        x0, x1 = x + 22 + tw + 14, x + w - (rw + 14 if rw else 0)
+        if x1 > x0:
+            g = cairo.LinearGradient(x0, 0, x1, 0)
+            g.add_color_stop_rgba(0, GOLD[0], GOLD[1], GOLD[2], 0.7); g.add_color_stop_rgba(1, GOLD[0], GOLD[1], GOLD[2], 0.0)
+            cr.set_source(g); cr.set_line_width(1); cr.move_to(x0, cy); cr.line_to(x1, cy); cr.stroke()
+        return y + 40
+
+    def row(self, y, title, sub=None, info=None, el=None, h=56, cw=None):
+        cr, x, w = self.cr, self.CX0, self.RW
+        hov = self.over(x, y, w, h)
+        if hov and info:
+            self._info = (title, info, el)
+        rrect(cr, x, y, w, h, 9)
+        if hov:
+            g = cairo.LinearGradient(x, 0, x + w, 0)
+            g.add_color_stop_rgba(0, GOLD[0], GOLD[1], GOLD[2], 0.20); g.add_color_stop_rgba(1, GOLD[0], GOLD[1], GOLD[2], 0.05)
+            cr.set_source(g)
+        else:
+            A(cr, NAVY2, 0.55)
+        cr.fill_preserve(); A(cr, GOLD, 0.55 if hov else 0.12); cr.set_line_width(1); cr.stroke()
+        cy = y + h / 2
+        if hov:
+            diamond(cr, x + 11, cy, 3.4); A(cr, el is not None and elc(el) or GOLD_HI); cr.fill()
+        cw = cw or min(340, w * 0.54)
+        if sub:
+            text(cr, title, x + 24, cy - 9, 15, IVORY, bold=True, width=w - cw - 50)
+            text(cr, sub, x + 24, cy + 11, 13, IVORY, 0.52, width=w - cw - 50)
+        else:
+            text(cr, title, x + 24, cy, 15, IVORY, bold=True, width=w - cw - 50)
+        return x + w - cw - 18, x + w - 18, cy
+
+    def selector(self, id, x0, x1, cy, label, prev, nxt, dim=False):
+        cr = self.cr; h = 36; y = cy - h / 2; w = x1 - x0
+        rrect(cr, x0, y, w, h, h / 2); A(cr, DEEP, 0.6); cr.fill_preserve(); A(cr, GOLD, 0.38); cr.set_line_width(1); cr.stroke()
+        for side, ax, fn in ((-1, x0 + h / 2, prev), (1, x1 - h / 2, nxt)):
+            hov = self.over(ax - h / 2, y, h, h)
+            cr.new_path(); cr.arc(ax, cy, 13, 0, 2 * math.pi); A(cr, GOLD, 0.30 if hov else 0.10); cr.fill()
+            cr.move_to(ax + 5 * side, cy); cr.line_to(ax - 3.5 * side, cy - 6); cr.line_to(ax - 3.5 * side, cy + 6); cr.close_path()
+            A(cr, GOLD_HI if hov else GOLD); cr.fill()
+            self.hit(f"{id}:{side}", ax - h / 2, y, h, h, press=lambda *_, f=fn: f(), scroll=lambda d, p=prev, n=nxt: (n if d > 0 else p)())
+        text(cr, label, (x0 + x1) / 2, cy, 14, IVORY, 0.55 if dim else 1.0, bold=True, anchor="c", width=w - 84)
+        self.hit(id, x0 + h, y, w - 2 * h, h, press=lambda *_: nxt(), scroll=lambda d: (nxt if d > 0 else prev)())
+
+    def slider(self, id, x0, x1, cy, value, lo, hi, on_change, fmt=fmt_pct, step=1.0, mark=None, center=None,
+               el=None, alt=None, muted=False):
+        cr = self.cr; tx0, tx1 = x0 + 10, x1 - 66
+        pos = lambda v: tx0 + (tx1 - tx0) * (max(lo, min(hi, v)) - lo) / (hi - lo)
+        hov = self.over(x0, cy - 17, x1 - x0, 34) or self.is_active(id)
+        cr.set_line_cap(cairo.LINE_CAP_ROUND)
+        cr.set_line_width(4); A(cr, NAVY3, 0.9); cr.move_to(tx0, cy); cr.line_to(tx1, cy); cr.stroke()
+        for q in range(5):
+            diamond(cr, tx0 + (tx1 - tx0) * q / 4, cy, 2.1); A(cr, GOLD, 0.3); cr.fill()
+        s0 = pos(center if center is not None else lo); xv = pos(value)
+        c0, c1 = (MUTE_C, MUTE_C) if muted else ((mix(elc(el), DEEP, 0.3), elc(el)) if el is not None else (GOLD_LO, GOLD_HI))
+        if abs(xv - s0) > 0.5:
+            g = cairo.LinearGradient(min(s0, xv), 0, max(s0, xv) + 1, 0)
+            g.add_color_stop_rgb(0, *c0); g.add_color_stop_rgb(1, *c1)
+            cr.set_source(g); cr.move_to(s0, cy); cr.line_to(xv, cy); cr.stroke()
+        if mark is not None and value > mark and not muted:
+            xm = pos(mark); g = cairo.LinearGradient(xm, 0, xv + 1, 0)
+            g.add_color_stop_rgb(0, *EL[0][1]); g.add_color_stop_rgb(1, *DANGER)
+            cr.set_source(g); cr.set_line_width(4); cr.move_to(xm, cy); cr.line_to(xv, cy); cr.stroke()
+        if mark is not None:
+            xm = pos(mark); cr.set_line_width(1.4); A(cr, GOLD_HI, 0.7); cr.move_to(xm, cy - 9); cr.line_to(xm, cy + 9); cr.stroke()
+        if center is not None:
+            diamond(cr, pos(center), cy, 3.4); A(cr, GOLD_HI, 0.8); cr.fill()
+        r = 9 if hov else 7.5
+        diamond(cr, xv, cy, r + 2); A(cr, GOLD, 0.35 if not muted else 0.1); cr.fill()
+        diamond(cr, xv, cy, r); A(cr, IVORY if not muted else MUTE_C); cr.fill_preserve()
+        A(cr, GOLD_LO); cr.set_line_width(1.4); cr.stroke()
+        diamond(cr, xv, cy, 2.4); A(cr, INK); cr.fill()
+        over_c = DANGER if (mark is not None and value > mark) else GOLD_HI
+        text(cr, fmt(value), x1, cy, 14, over_c if not muted else MUTE_C, bold=True, anchor="r")
+
+        def setv(mx, my):
+            v = lo + (mx - tx0) / (tx1 - tx0) * (hi - lo)
+            on_change(max(lo, min(hi, round(v / step) * step)))
+        self.hit(id, x0, cy - 17, x1 - x0, 34, press=setv, drag=setv, alt=alt,
+                 scroll=lambda d: on_change(max(lo, min(hi, round((value + d * step * (1 if step >= 1 else 1)) / step) * step))))
+
+    def toggle(self, id, x1, cy, on, cb, busy=False):
+        cr = self.cr; w, h = 62, 30; x = x1 - w; y = cy - h / 2
+        a = self.lerp_anim(id, 1.0 if on else 0.0)
+        hov = self.over(x - 80, y, w + 80, h)
+        rrect(cr, x, y, w, h, h / 2)
+        g = cairo.LinearGradient(x, 0, x + w, 0)
+        c0, c1 = mix(NAVY3, GOLD_LO, a), mix(NAVY3, GOLD, a)
+        g.add_color_stop_rgb(0, *c0); g.add_color_stop_rgb(1, *c1); cr.set_source(g); cr.fill_preserve()
+        A(cr, GOLD, 0.9 if hov else 0.55); cr.set_line_width(1.2); cr.stroke()
+        kx = x + h / 2 + a * (w - h)
+        cr.new_path(); cr.arc(kx, cy, h / 2 - 4, 0, 2 * math.pi); A(cr, mix(MUTE_C, IVORY, a)); cr.fill()
+        star(cr, kx, cy, 6.5 * a + 0.01, 0.25, self.t * 0.8 if busy else 0); A(cr, INK, a); cr.fill()
+        lab = "Casting…" if busy else ("On" if on else "Off")
+        text(cr, lab, x - 12, cy, 14, GOLD_HI if on else IVORY, 1.0 if on else 0.5, bold=on, anchor="r")
+        self.hit(id, x - 80, y, w + 80, h, press=lambda *_: cb() if not busy else None)
+
+    def gbutton(self, id, x, y, w, h, label, cb, glyph="o", dark=False, enabled=True):
+        cr = self.cr; hov = enabled and self.over(x, y, w, h)
+        fl = max(0.0, 1 - (self.t - self.flashes.get(id, -9)) / 0.25)
+        if hov:
+            rrect(cr, x - 3, y - 3, w + 6, h + 6, h / 2 + 3); A(cr, GOLD, 0.55); cr.set_line_width(2); cr.stroke()
+        rrect(cr, x, y, w, h, h / 2)
+        if dark:
+            A(cr, mix(NAVY3, GOLD, 0.22 if hov else 0.0))
+        else:
+            A(cr, GOLD_HI if hov else IVORY)
+        cr.fill_preserve(); A(cr, GOLD_LO, 0.8); cr.set_line_width(1); cr.stroke()
+        if fl > 0:
+            rrect(cr, x, y, w, h, h / 2); A(cr, (1, 1, 1), 0.35 * fl); cr.fill()
+        r = h / 2 - 5; cx, cy = x + h / 2, y + h / 2
+        cr.new_path(); cr.arc(cx, cy, r, 0, 2 * math.pi); A(cr, DEEP if dark else INK); cr.fill()
+        if glyph == "o":
+            cr.new_path(); cr.arc(cx, cy, r * 0.52, 0, 2 * math.pi); A(cr, O_YEL); cr.set_line_width(2.4); cr.stroke()
+        elif glyph == "x":
+            k = r * 0.42; A(cr, X_BLUE); cr.set_line_width(2.6); cr.set_line_cap(cairo.LINE_CAP_ROUND)
+            cr.move_to(cx - k, cy - k); cr.line_to(cx + k, cy + k); cr.move_to(cx + k, cy - k); cr.line_to(cx - k, cy + k); cr.stroke()
+        elif glyph:
+            icon(cr, glyph, cx, cy, r * 1.1, GOLD_HI)
+        text(cr, label, x + h + (w - h - 14) / 2, cy, 14, IVORY if dark else INK, bold=True, anchor="c", width=w - h - 16)
+        if not enabled:
+            rrect(cr, x, y, w, h, h / 2); A(cr, DEEP, 0.5); cr.fill()
+        else:
+            self.hit(id, x, y, w, h, press=lambda *_: (self.flashes.__setitem__(id, self.t), cb()))
+
+    def badge(self, x1, cy, label, col=IVORY, fg=INK):
+        cr = self.cr; w = measure(cr, label, 13, True) + 44; h = 30; x = x1 - w
+        rrect(cr, x, cy - h / 2, w, h, h / 2); A(cr, col); cr.fill()
+        icon(cr, "check", x + 16, cy, 14, fg); text(cr, label, x + 28, cy, 13, fg, bold=True)
+        return w
+
+    def medal(self, cx, cy, r, kind=None, el=None, icons=None, letter="?", ring=False):
+        cr = self.cr
+        if ring and el is not None:
+            g = cairo.RadialGradient(cx, cy, r * 0.6, cx, cy, r + 12); c = elc(el)
+            g.add_color_stop_rgba(0, c[0], c[1], c[2], 0.35); g.add_color_stop_rgba(1, c[0], c[1], c[2], 0)
+            cr.set_source(g); cr.new_path(); cr.arc(cx, cy, r + 12, 0, 2 * math.pi); cr.fill()
+        cr.new_path(); cr.arc(cx, cy, r, 0, 2 * math.pi); A(cr, NAVY); cr.fill_preserve(); A(cr, GOLD); cr.set_line_width(1.6); cr.stroke()
+        cr.new_path(); cr.arc(cx, cy, r - 4, 0, 2 * math.pi); A(cr, elc(el) if (ring and el is not None) else GOLD, 0.45); cr.set_line_width(1); cr.stroke()
+        if icons and self.host.app_icon(cr, icons, cx, cy, int(r * 1.15)):
+            return
+        if kind:
+            icon(cr, kind, cx, cy, r * 0.95, GOLD_HI)
+        else:
+            text(cr, letter, cx, cy, r * 0.8, GOLD_HI, bold=True, anchor="c")
+
+    def card(self, y, title, sub, kind=None, el=None, icons=None, letter=None, current=False, right=None, h=74):
+        cr, x, w = self.cr, self.CX0, self.RW
+        rrect(cr, x, y, w, h, 12)
+        g = cairo.LinearGradient(0, y, 0, y + h); g.add_color_stop_rgb(0, *NAVY3); g.add_color_stop_rgb(1, *NAVY2)
+        cr.set_source(g); cr.fill_preserve(); A(cr, GOLD, 0.95 if current else 0.45); cr.set_line_width(1.3 if current else 1); cr.stroke()
+        if current:
+            rrect(cr, x + 4, y + 4, w - 8, h - 8, 9); A(cr, elc(el), 0.35); cr.set_line_width(1); cr.stroke()
+        cy = y + h / 2
+        self.medal(x + 40, cy, 24, kind, el, icons, letter or (title[:1] or "?").upper(), ring=current)
+        rw = 190
+        text(cr, title, x + 78, cy - 11, 17, IVORY, bold=True, width=w - 78 - rw)
+        text(cr, sub, x + 78, cy + 12, 13, GOLD, 0.9, width=w - 78 - rw)
+        if right:
+            right(x + w - 18, cy)
+        return y + h + 8
+
+    def empty(self, y, msg):
+        cr, x, w = self.cr, self.CX0, self.RW
+        rrect(cr, x, y, w, 70, 12); A(cr, NAVY2, 0.35); cr.fill_preserve(); A(cr, GOLD, 0.2); cr.set_line_width(1)
+        cr.set_dash([4, 5]); cr.stroke(); cr.set_dash([])
+        star(cr, x + 34, y + 35, 10, 0.22, self.t * 0.4); A(cr, GOLD, 0.6); cr.fill()
+        text(cr, msg, x + 56, y + 35, 14, IVORY, 0.6, width=w - 80)
+        return y + 82
+
+    # ── actions ──
+    def mode(self, key, fn, mk):
+        if key in self.busy:
+            return
+        want = not self.alive(mk); self.cfg[key] = want; self.save(); self.busy.add(key); st = self.st
+
+        def job():
+            msg = fn(want, self.rt, st); save_rt(self.rt)
+            actual = bool(coop_module(snapshot())) if key == "coop" and not DEMO else (mk in self.rt)
+            def done():
+                self.cfg[key] = actual; self.save()
+                self.busy.discard(key); self.toast(msg); self.refresh()
+            self.host.idle(done)
+        POOL.submit(job)
+
+    def coop_has(self, name):
+        sel = self.cfg["coop_devices"]
+        return sel is None or name in sel
+
+    def coop_pick(self, name):
+        hw = [s["name"] for s in hw_sinks(self.st)]
+        cur = self.cfg["coop_devices"]
+        sel = list(hw if cur is None else cur)
+        if name in sel:
+            sel.remove(name)
+        else:
+            sel.append(name)
+        self.cfg["coop_devices"] = sel; self.rt["coop_sel"] = sel
+        self.save(); self.coop_due = self.t + 0.9
+
+    def coop_sync_toggle(self):
+        v = not self.cfg["coop_sync"]
+        self.cfg["coop_sync"] = v; self.rt["coop_sync"] = v
+        self.save(); self.coop_due = self.t + 0.5
+
+    def coop_rebuild(self):
+        if not self.alive("coop_mod"):
+            return
+        self.busy.add("coop"); st = self.st
+
+        def job():
+            msg = coop_reload(self.rt, st); save_rt(self.rt)
+
+            def done():
+                self.busy.discard("coop"); self.cfg["coop"] = "coop_mod" in self.rt
+                self.save(); self.toast(msg); self.refresh()
+            self.host.idle(done)
+        POOL.submit(job)
+
+    def set_default(self, kind, d):
+        group = coop_module(self.st) if kind == "sink" else None
+        if group and f"sink_name={d['name']}" not in group["arg"].split():
+            self.toast("Co-op is active: change members in Co-op Circle, or turn it off first")
+            return
+        def job():
+            ok = run(["pactl", f"set-default-{kind}", d["name"]])
+            if ok and kind == "sink" and self.cfg["follow_streams"]:
+                ok = not move_all(self.st, d["name"])
+            self.host.idle(lambda: (self.toast(f"Now using {d['desc']}" if ok else "Could not switch every stream"), self.on_event()))
+        COMMANDS.submit(job)
+
+    def level(self, kind, ident, ch, vol, bal, key):
+        self.queue(key, ["pactl", f"set-{kind}-volume", str(ident)] + chan_values(ch, vol, bal))
+
+    def eq_set(self, i, g):
+        eq = self.cfg["eq"]; eq["gains"][i] = g; eq["preset"] = "Custom"; self.eq_changed()
+
+    def eq_changed(self):
+        self.eq_dirty = True; self.eq_push_at = self.t + 0.12; self.save()
+
+    def eq_toggle(self):
+        if "eq" in self.busy:
+            return
+        on = not self.eq.running(); self.cfg["eq"]["enabled"] = on; self.save(); self.busy.add("eq")
+        eq, st = json.loads(json.dumps(self.cfg["eq"])), self.st
+
+        def job():
+            msg = self.eq.start(eq, st) if on else self.eq.stop(st); save_rt(self.rt)
+            self.host.idle(lambda: (self.busy.discard("eq"), self.toast(msg), self.refresh()))
+        POOL.submit(job)
+
+    def eq_restart(self):
+        if self.eq.running():
+            eq, st = json.loads(json.dumps(self.cfg["eq"])), self.st
+            POOL.submit(lambda: (self.eq.start(eq, st), save_rt(self.rt)))
+
+    def night_start(self):
+        n = self.cfg["night"]
+        if DEMO:
+            self.rt["night"] = dict(pid=0, start=time.time() - 400, dur=n["minutes"] * 60, v0=64, action=n["action"], curve=n["curve"])
+        else:
+            try:
+                subprocess.Popen([sys.executable, SELF, "--night-watch", str(n["minutes"]), str(n["curve"]), str(n["action"])],
+                                 start_new_session=True, env=clean_env(), stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            except Exception:
+                self.toast("Could not start the watch"); return
+            self.rt_read = self.t - 0.5
+        self.toast(f"Paimon will keep watch for {n['minutes']} minutes")
+
+    def night_stop(self):
+        night = self.rt.pop("night", None)
+        if night and night.get("pid") and not DEMO:
+            try:
+                os.kill(int(night["pid"]), signal.SIGTERM)
+            except Exception:
+                pass
+        self.toast("The watch has ended, volume restored")
+
+    def open_mixer(self):
+        sib = os.path.join(os.path.dirname(SELF), "irminsul-volume")
+        for cmd in ([sib] if os.access(sib, os.X_OK) else []) + ["irminsul-volume"]:
+            try:
+                subprocess.Popen([cmd], start_new_session=True, env=clean_env()); return
+            except Exception:
+                continue
+        self.toast("irminsul-volume was not found on PATH")
+
+    # ── shared blocks ──
+    def dev_block(self, y, d, kind, is_def, el):
+        k = kind; name = d["name"]
+        sub = "  ·  ".join(x for x in (d["spec"], d["state"], d["api"]) if x)
+
+        def right(x1, cy):
+            if is_def:
+                self.badge(x1, cy, "In use")
+            else:
+                self.gbutton(f"def:{name}", x1 - 176, cy - 20, 176, 40, "Set as default", lambda: self.set_default(k, d))
+        y = self.card(y, d["desc"], sub, kind=d["kind"] if k == "sink" else "mic", el=el, current=is_def, right=right)
+        if d["ports"]:
+            names = [p[0] for p in d["ports"]]; i = names.index(d["port"]) if d["port"] in names else 0
+            lab = lambda p: p[1] + ("  (unplugged)" if p[2] in ("not available", "no") else "")
+
+            def setp(j):
+                p = d["ports"][j % len(names)]
+                self.do(["pactl", f"set-{k}-port", name, p[0]], f"Port: {p[1]}")
+            x0, x1, cy = self.row(y, "Port", f"{len(names)} connector{'s' if len(names) != 1 else ''}", el=el,
+                                  info="The physical connector this device uses. Switch between speakers and the "
+                                       "headphone jack, or line-in and the front mic, without replugging anything.")
+            self.selector(f"port:{name}", x0, x1, cy, lab(d["ports"][i]), lambda: setp(i - 1), lambda: setp(i + 1))
+            y += 62
+        kv, kb, km, kl = f"v:{k}:{name}", f"b:{k}:{name}", f"m:{k}:{name}", f"lvl:{k}:{name}"
+        vol, bal, mute = self.hv(kv, d["vol"]), self.hv(kb, d["bal"]), self.hv(km, d["mute"])
+        lim = self.cfg["boost_limit"]
+
+        def setv(v):
+            self.sethold(kv, v); self.level(k, name, d["ch"], v, self.hv(kb, d["bal"]), kl)
+
+        def setb(b):
+            self.sethold(kb, b); self.level(k, name, d["ch"], self.hv(kv, d["vol"]), b, kl)
+        x0, x1, cy = self.row(y, "Volume", "Past 100 % is overdrive", el=el,
+                              info=f"Software gain up to {lim} %. Anything past the bright tick is amplified "
+                                   "beyond the device's own maximum: great for quiet recordings, but it can clip. "
+                                   "Right-click to snap back to 100 %.")
+        self.slider(kv, x0, x1, cy, vol, 0, lim, setv, mark=100, el=el if k == "source" else None, muted=mute,
+                    alt=lambda: setv(100))
+        y += 62
+        if len(d["ch"]) >= 2:
+            x0, x1, cy = self.row(y, "Balance", ", ".join(c.replace("front-", "").replace("-", " ") for c, _ in d["ch"][:4]), el=el,
+                                  info="Shift the sound between the left and right channels. Perfect for a headset "
+                                       "where one side is weaker, or speakers that sit at different distances. "
+                                       "Right-click to centre.")
+            self.slider(kb, x0, x1, cy, bal, -100, 100, setb, fmt=fmt_bal, center=0, el=el, alt=lambda: setb(0))
+            y += 62
+        x0, x1, cy = self.row(y, "Mute", el=el, info="Silence this device without touching its volume.")
+        self.toggle(km, x1, cy, mute, lambda: (self.sethold(km, not mute), self.do(["pactl", f"set-{k}-mute", name, "toggle"])))
+        y += 62
+        if k == "sink":
+            sus = d["state"] == "Suspended"
+            x0, x1, cy = self.row(y, "Suspend", "Close the device to save power", el=el,
+                                  info="Puts the hardware to sleep. Useful to release an HDMI output, stop a "
+                                       "humming amplifier, or free the device for another program. Any new sound wakes it.")
+            self.toggle(f"sus:{name}", x1, cy, sus,
+                        lambda: self.do(["pactl", "suspend-sink", name, "0" if sus else "1"], "Device woken" if sus else "Device sleeping"))
+            y += 62
+        return y + 16
+
+    def info_row(self, y, title, value, sub=None, info=None, el=None):
+        x0, x1, cy = self.row(y, title, sub, info=info, el=el)
+        text(self.cr, value or "—", x1, cy, 14, GOLD_HI, bold=True, anchor="r", width=x1 - x0)
+        return y + 62
+
+    # ── pages ──
+    def page_outputs(self, y):
+        st = self.st
+        y = self.section(y, "Resonance Modes")
+        x0, x1, cy = self.row(y, "Co-op Output", "Chosen devices play at once", el=1,
+                              info="Combines the outputs you pick below into one virtual device, so headphones, "
+                                   "speakers and the monitor play the same sound. Pick two or as many as you like.")
+        self.toggle("coop", x1, cy, self.alive("coop_mod"), lambda: self.mode("coop", mode_coop, "coop_mod"), "coop" in self.busy)
+        y += 62
+        x0, x1, cy = self.row(y, "Latency Sync", "Line up Bluetooth with wired", el=1,
+                              info="Bluetooth headphones hear everything a fraction of a second late. With this on, the "
+                                   "server attempts latency compensation; exact Bluetooth timing is not guaranteed. Turn it off "
+                                   "for the lowest delay when you do not mind a small echo between devices.")
+        self.toggle("coopsync", x1, cy, self.cfg["coop_sync"], self.coop_sync_toggle)
+        y += 62
+        x0, x1, cy = self.row(y, "Mono Audio", "Both ears hear everything", el=1,
+                              info="Folds stereo into a single channel and plays it on both sides. Helps when you "
+                                   "wear one earbud, or for hearing in one ear only.")
+        self.toggle("mono", x1, cy, self.alive("mono_mod"), lambda: self.mode("mono", mode_mono, "mono_mod"), "mono" in self.busy)
+        y += 62
+        hw = hw_sinks(st); chosen = len(coop_members(st, self.cfg["coop_devices"]))
+        y = self.section(y, "Co-op Circle", f"{chosen} of {len(hw)} chosen")
+        if len(hw) < 2:
+            y = self.empty(y, "Connect a second output device and it will appear here.")
+        for s in hw:
+            sub = "  \u00b7  ".join(x for x in (s["kind"].title(), s["state"]) if x)
+            x0, x1, cy = self.row(y, s["desc"], sub, el=1,
+                                  info="Switch on every device that should join the Co-op output. "
+                                       "Changes apply right away if Co-op is already running.")
+            self.toggle(f"cm:{s['name']}", x1, cy, self.coop_has(s["name"]), lambda n=s["name"]: self.coop_pick(n))
+            y += 62
+        sinks = st["sinks"]
+        y = self.section(y, "Output Devices", f"{len(sinks)} found")
+        if not sinks:
+            return self.empty(y, "No outputs found. Is PipeWire or PulseAudio running?")
+        for s in sinks:
+            y = self.dev_block(y, s, "sink", s["name"] == st["default_sink"], 1)
+        return y
+
+    def page_inputs(self, y):
+        st = self.st; cr = self.cr
+        y = self.section(y, "Voice Enchantments")
+        x0, x1, cy = self.row(y, "Clear Voice", "WebRTC noise suppression and echo cancel", el=2,
+                              info="Creates a cleaned-up microphone that removes fans, keyboards and room echo "
+                                   "in real time, and makes it your default input. Your apps pick it up automatically.")
+        self.toggle("clear", x1, cy, self.alive("clear_mod"), lambda: self.mode("clear_voice", mode_clear_voice, "clear_mod"),
+                    "clear_voice" in self.busy)
+        y += 62
+        x0, x1, cy = self.row(y, "Hear Yourself", "Send the mic to your output", el=2,
+                              info="Plays your microphone back through your output with about 40 ms of delay. "
+                                   "Use headphones, or the speakers will feed back.")
+        self.toggle("loop", x1, cy, self.alive("loop_mod"), lambda: self.mode("loopback", mode_loopback, "loop_mod"), "loopback" in self.busy)
+        y += 62
+        x0, x1, cy = self.row(y, "Live Level", "Speak and watch the leaves", el=2,
+                              info="What your default microphone hears right now. Aim for the green zone when "
+                                   "speaking normally; the warm segments mean you are close to clipping.")
+        lv = max(self.lv); n = 20; seg = (x1 - x0 - 70) / n
+        for i in range(n):
+            on = lv * n > i; c = EL[2][1] if i < 13 else EL[6][1] if i < 17 else EL[0][1]
+            rrect(cr, x0 + i * seg, cy - 8, seg - 4, 16, 3); A(cr, c if on else NAVY3, 0.95 if on else 0.6); cr.fill()
+        db = self.an.peak_db
+        text(cr, f"{max(-60, db):.0f} dB" if db > -89 else "silent", x1, cy, 14, GOLD_HI, bold=True, anchor="r")
+        y += 62
+        srcs = st["srcs"]
+        y = self.section(y, "Microphones", f"{len(srcs)} found")
+        if not srcs:
+            return self.empty(y, "No microphones found.")
+        for s in srcs:
+            y = self.dev_block(y, s, "source", s["name"] == st["default_src"], 2)
+        return y
+
+    def page_streams(self, y):
+        st = self.st; apps, sinks = st["apps"], st["sinks"]; lim = self.cfg["boost_limit"]
+        y = self.section(y, "Playback", f"{len(apps)} playing" if apps else "")
+        if not apps:
+            y = self.empty(y, "The party is quiet. Play something and it will appear here.")
+        for a in apps:
+            idx = a["idx"]
+
+            def right(x1, cy, a=a):
+                self.gbutton(f"ban:{a['idx']}", x1 - 140, cy - 20, 140, 40, "Banish", lambda: self.ask(
+                    "Banish this stream?", f"{a['name']} will lose its connection to the sound server. Most apps simply "
+                    "reconnect the next time they play.", "Banish",
+                    lambda: self.do(["pactl", "kill-sink-input", str(a["idx"])], f"{a['name']} was banished")), glyph="x", dark=True)
+            sub = (a["media"] or "Playing") + ("  ·  paused" if a["corked"] else "")
+            y = self.card(y, a["name"], sub, el=0, icons=a["icons"], current=not a["corked"], right=right)
+            names = [s["name"] for s in sinks]; i = next((j for j, s in enumerate(sinks) if s["idx"] == a["sink"]), 0)
+
+            def mv(j, a=a):
+                s = sinks[j % len(sinks)]
+                self.do(["pactl", "move-sink-input", str(a["idx"]), s["name"]], f"{a['name']} → {s['desc']}")
+            x0, x1, cy = self.row(y, "Output", "Where this app plays", el=0,
+                                  info="Send just this app to another device. The rest of the party stays where it is. "
+                                       "WirePlumber remembers the choice next time the app plays.")
+            if sinks:
+                self.selector(f"mv:{idx}", x0, x1, cy, sinks[i]["desc"], lambda i=i, mv=mv: mv(i - 1), lambda i=i, mv=mv: mv(i + 1))
+            y += 62
+            kv, kb, km, kl = f"v:si:{idx}", f"b:si:{idx}", f"m:si:{idx}", f"lvl:si:{idx}"
+            vol, bal, mute = self.hv(kv, a["vol"]), self.hv(kb, a["bal"]), self.hv(km, a["mute"])
+
+            def setv(v, a=a, kv=kv, kb=kb, kl=kl):
+                self.sethold(kv, v); self.level("sink-input", a["idx"], a["ch"], v, self.hv(kb, a["bal"]), kl)
+
+            def setb(b, a=a, kv=kv, kb=kb, kl=kl):
+                self.sethold(kb, b); self.level("sink-input", a["idx"], a["ch"], self.hv(kv, a["vol"]), b, kl)
+            x0, x1, cy = self.row(y, "Volume", el=0, info="This app's own volume, independent of the device. "
+                                  "Boost a whispering video call past 100 %. Right-click for 100 %.")
+            self.slider(kv, x0, x1, cy, vol, 0, lim, setv, mark=100, el=0, muted=mute, alt=lambda setv=setv: setv(100))
+            y += 62
+            if len(a["ch"]) >= 2:
+                x0, x1, cy = self.row(y, "Balance", el=0, info="Pan this app left or right. Right-click to centre.")
+                self.slider(kb, x0, x1, cy, bal, -100, 100, setb, fmt=fmt_bal, center=0, el=0, alt=lambda setb=setb: setb(0))
+                y += 62
+            x0, x1, cy = self.row(y, "Mute", el=0, info="Silence only this app.")
+            self.toggle(km, x1, cy, mute, lambda km=km, mute=mute, idx=idx: (
+                self.sethold(km, not mute), self.do(["pactl", "set-sink-input-mute", str(idx), "toggle"])))
+            y += 78
+        recs, srcs = st["recs"], st["srcs"]
+        y = self.section(y, "Recording", f"{len(recs)} listening" if recs else "")
+        if not recs:
+            return self.empty(y, "Nothing is using a microphone.")
+        for r in recs:
+            i = next((j for j, s in enumerate(srcs) if s["idx"] == r["src"]), 0)
+
+            def mv(j, r=r):
+                s = srcs[j % len(srcs)]
+                self.do(["pactl", "move-source-output", str(r["idx"]), s["name"]], f"{r['name']} now hears {s['desc']}")
+            x0, x1, cy = self.row(y, r["name"], r["media"] or "Recording", el=2,
+                                  info="Choose which microphone this app listens to, without changing your default.")
+            if srcs:
+                self.selector(f"rec:{r['idx']}", x0, x1, cy, srcs[i]["desc"], lambda i=i, mv=mv: mv(i - 1), lambda i=i, mv=mv: mv(i + 1))
+            y += 62
+        return y
+
+    def page_profiles(self, y):
+        cards = self.st["cards"]
+        y = self.section(y, "Sound Cards", f"{len(cards)} found")
+        if not cards:
+            return self.empty(y, "No sound cards reported by the server.")
+        for c in cards:
+            y = self.card(y, c["desc"], c["name"], kind="bt" if c["bluez"] else "card", el=3, current=c["active"] != "off")
+            profs = [p for p in c["profiles"] if p[2] or p[0] == c["active"]] or c["profiles"]
+            names = [p[0] for p in profs]; i = names.index(c["active"]) if c["active"] in names else 0
+
+            def setp(j, c=c, profs=profs):
+                p = profs[j % len(profs)]
+                self.do(["pactl", "set-card-profile", c["name"], p[0]], f"{c['desc']}: {p[1]}")
+            x0, x1, cy = self.row(y, "Profile", f"{len(profs)} available", el=3,
+                                  info="The card's mode. Stereo or 5.1 surround, analog or HDMI, duplex with the mic "
+                                       "or output only. For Bluetooth: A2DP is high-fidelity, HSP/HFP enables the mic "
+                                       "at phone quality. 'Off' frees the card.", cw=min(400, self.RW * 0.62))
+            if profs:
+                self.selector(f"prof:{c['name']}", x0, x1, cy, profs[i][1], lambda i=i, s=setp: s(i - 1), lambda i=i, s=setp: s(i + 1))
+            y += 62
+            if c["bluez"]:
+                info = self.codecs.get(c["name"])
+                x0, x1, cy = self.row(y, "Codec", "How audio travels over the air", el=3,
+                                      info="LDAC and aptX HD carry the most detail, AAC suits Apple gear, SBC works "
+                                           "everywhere, LC3 is the new low-energy codec. Only codecs both sides support "
+                                           "appear. Requires PipeWire.")
+                if info is None:
+                    self.selector(f"codec:{c['name']}", x0, x1, cy, "Reading codecs…", lambda: None, lambda: None, dim=True)
+                elif not info[0]:
+                    self.selector(f"codec:{c['name']}", x0, x1, cy, "Not available in this profile", lambda: None, lambda: None, dim=True)
+                else:
+                    lst, cur = info; nm = [n for n, _ in lst]; j = nm.index(cur) if cur in nm else 0
+
+                    def setc(k, c=c, lst=lst):
+                        n, dsc = lst[k % len(lst)]
+
+                        def job():
+                            ok = run(["pactl", "send-message", f"/card/{c['name']}/bluez", "switch-codec", json.dumps(n)])
+                            self.host.idle(lambda: (self.codecs.__setitem__(c["name"], (lst, n)) if ok else None,
+                                                    self.toast(f"Codec: {dsc}" if ok else "The headset refused that codec")))
+                        POOL.submit(job)
+                    self.selector(f"codec:{c['name']}", x0, x1, cy, lst[j][1], lambda j=j, s=setc: s(j - 1), lambda j=j, s=setc: s(j + 1))
+                y += 62
+            y += 16
+        return y
+
+    def page_eq(self, y):
+        eq = self.cfg["eq"]; cr = self.cr; running = self.eq.running()
+        y = self.eq_canvas(y, eq, running)
+        x0, x1, cy = self.row(y, "Equalizer", "Runs inside PipeWire as a virtual device", el=4,
+                              info="Starts a PipeWire filter-chain called 'Irminsul Equalizer', makes it the default "
+                                   "output and routes it to your device. Switch off to bypass it completely.")
+        self.toggle("eq", x1, cy, running, self.eq_toggle, "eq" in self.busy)
+        y += 62
+        names = [p[0] for p in EQ_PRESETS]; i = names.index(eq["preset"]) if eq["preset"] in names else -1
+
+        def setp(j):
+            n, g = EQ_PRESETS[j % len(EQ_PRESETS)]; eq["preset"], eq["gains"] = n, list(g); self.eq_changed()
+        x0, x1, cy = self.row(y, "Preset", "Seven elements, seven characters", el=4,
+                              info="Geo for bass weight, Hydro for warmth, Anemo for clear voices, Cryo for sparkle, "
+                                   "Electro for the V-shaped 'fun' curve, Pyro for loudness at low volume, Dendro for "
+                                   "podcasts. Moving any star turns it into Custom.")
+        self.selector("eqp", x0, x1, cy, eq["preset"] if i >= 0 else "Custom", lambda: setp(i - 1 if i >= 0 else 0), lambda: setp(i + 1))
+        y += 62
+        qi = min(range(3), key=lambda k: abs(Q_OPTS[k][1] - eq["q"]))
+
+        def setq(k):
+            eq["q"] = Q_OPTS[k % 3][1]; self.eq_changed()
+        x0, x1, cy = self.row(y, "Band Width", f"Q {eq['q']:.2f}", el=4,
+                              info="How wide each star reaches. Narrow is surgical, for taming a single harsh "
+                                   "note. Wide is musical, for broad tone shaping.")
+        self.selector("eqq", x0, x1, cy, Q_OPTS[qi][0], lambda: setq(qi - 1), lambda: setq(qi + 1))
+        y += 62
+
+        def setpre(v):
+            eq["preamp"] = v; self.eq_changed()
+        x0, x1, cy = self.row(y, "Preamp", "Headroom before the bands", el=4,
+                              info="Lowers everything before the bands so boosts cannot clip. A good rule: preamp "
+                                   "equal to minus your largest boost. Right-click for 0 dB.")
+        self.slider("eqpre", x0, x1, cy, eq["preamp"], -15, 6, setpre, fmt=fmt_db, step=0.5, center=0, el=4, alt=lambda: setpre(0))
+        y += 62
+        hw = hw_sinks(self.st); tn = [s["name"] for s in hw]
+        tgt = eq.get("target") or self.rt.get("eq_target") or ""
+        ti = tn.index(tgt) if tgt in tn else -1
+
+        def sett(j):
+            if hw:
+                eq["target"] = hw[j % len(hw)]["name"]; self.save(); self.eq_restart()
+        x0, x1, cy = self.row(y, "Output Through", "The device the EQ feeds", el=4,
+                              info="The real device that receives the equalized sound. Leave it on your usual "
+                                   "output; changing it while the EQ runs re-routes it instantly.")
+        self.selector("eqt", x0, x1, cy, hw[ti]["desc"] if ti >= 0 else "Current default device",
+                      lambda: sett(ti - 1 if ti >= 0 else 0), lambda: sett(ti + 1))
+        y += 62
+        x0, x1, cy = self.row(y, "Tools", el=4, info="Auto preamp sets headroom from the real curve peak. "
+                              "Reset flattens every band. Right-click any star to flatten just that one.")
+        bw = (x1 - x0 - 12) / 2
+
+        def autop():
+            pk = max(eq_response(eq["gains"], 0, eq["q"], 120)); eq["preamp"] = -math.ceil(max(0, pk) * 2) / 2; self.eq_changed()
+            self.toast(f"Preamp set to {fmt_db(eq['preamp'])}")
+        self.gbutton("eqauto", x0, cy - 20, bw, 40, "Auto preamp", autop, dark=True)
+        self.gbutton("eqreset", x0 + bw + 12, cy - 20, bw, 40, "Reset bands", lambda: setp(0), glyph="x", dark=True)
+        return y + 62
+
+    def eq_canvas(self, y, eq, running):
+        cr, x, w = self.cr, self.CX0, self.RW; h = 330
+        rrect(cr, x, y, w, h, 14); A(cr, DEEP, 0.55); cr.fill_preserve(); A(cr, GOLD, 0.3); cr.set_line_width(1); cr.stroke()
+        px0, px1, py0, py1 = x + 64, x + w - 34, y + 48, y + h - 58
+        zero = (py0 + py1) / 2; half = (py1 - py0) / 2
+        dy = lambda g: zero - max(-13, min(13, g)) / 12 * half
+        fx = lambda f: px0 + math.log(f / 20) / math.log(1000) * (px1 - px0)
+        for g in (12, 6, 0, -6, -12):
+            cr.set_line_width(1); A(cr, GOLD, 0.35 if g == 0 else 0.1); cr.move_to(px0 - 10, dy(g)); cr.line_to(px1 + 10, dy(g)); cr.stroke()
+            text(cr, ("+" if g > 0 else "−" if g < 0 else "") + str(abs(g)), x + 22, dy(g), 12, IVORY, 0.5)
+        for f in (100, 1000, 10000):
+            A(cr, GOLD, 0.08); cr.move_to(fx(f), py0 - 6); cr.line_to(fx(f), py1 + 6); cr.stroke()
+        text(cr, f"Preamp {fmt_db(eq['preamp'])}   ·   Q {eq['q']:.2f}   ·   {eq['preset']}", x + 22, y + 22, 13, GOLD, 0.85)
+        sc = EL[4][1] if running else MUTE_C
+        cr.new_path(); cr.arc(x + w - 100, y + 22, 4.5, 0, 2 * math.pi); A(cr, sc, 0.6 + 0.4 * math.sin(self.t * 3) if running else 0.8); cr.fill()
+        text(cr, "Live" if running else "Resting", x + w - 88, y + 22, 13, sc, bold=True)
+        sig = (tuple(eq["gains"]), eq["preamp"], eq["q"])
+        if sig != self.eq_sig:
+            self.eq_sig, self.eq_resp = sig, eq_response(eq["gains"], eq["preamp"], eq["q"])
+        resp = self.eq_resp; n = len(resp)
+        pts = [(px0 + (px1 - px0) * k / (n - 1), dy(v)) for k, v in enumerate(resp)]
+        cr.move_to(*pts[0])
+        for p in pts[1:]:
+            cr.line_to(*p)
+        cr.line_to(px1, zero); cr.line_to(px0, zero); cr.close_path()
+        g = cairo.LinearGradient(px0, 0, px1, 0)
+        for k in range(7):
+            c = el_grad(k / 6); g.add_color_stop_rgba(k / 6, c[0], c[1], c[2], 0.26 if running else 0.08)
+        cr.set_source(g); cr.fill()
+        for lw, col, al in ((8, GOLD, 0.12), (2.4, GOLD_HI if running else MUTE_C, 1.0)):
+            cr.move_to(*pts[0])
+            for p in pts[1:]:
+                cr.line_to(*p)
+            cr.set_line_width(lw); A(cr, col, al); cr.stroke()
+        labels = ["32", "64", "125", "250", "500", "1k", "2k", "4k", "8k", "16k"]
+        for i, f in enumerate(EQ_FREQS):
+            kx, ky, col, id = fx(f), dy(eq["gains"][i]), el_grad(i / 9), f"band{i}"
+            hov = self.over(kx - 20, py0 - 14, 40, py1 - py0 + 28) or self.is_active(id)
+            cr.set_line_width(1); A(cr, col, 0.3 if hov else 0.1); cr.move_to(kx, py0 - 8); cr.line_to(kx, py1 + 8); cr.stroke()
+            gl = cairo.RadialGradient(kx, ky, 0, kx, ky, 22)
+            gl.add_color_stop_rgba(0, col[0], col[1], col[2], 0.55 if hov else 0.3); gl.add_color_stop_rgba(1, col[0], col[1], col[2], 0)
+            cr.set_source(gl); cr.new_path(); cr.arc(kx, ky, 22, 0, 2 * math.pi); cr.fill()
+            star(cr, kx, ky, 12 if hov else 9.5, 0.3, self.t * 0.6 if hov else 0); A(cr, col); cr.fill_preserve()
+            A(cr, GOLD_HI); cr.set_line_width(1.2); cr.stroke()
+            diamond(cr, kx, ky, 2.2); A(cr, INK); cr.fill()
+            text(cr, labels[i], kx, py1 + 26, 12.5, IVORY if hov else IVORY, 1.0 if hov else 0.6, bold=hov, anchor="c")
+            if hov:
+                lab = fmt_db(eq["gains"][i]); tw = measure(cr, lab, 13, True) + 18; ly = ky - 30 if ky > py0 + 30 else ky + 30
+                rrect(cr, kx - tw / 2, ly - 13, tw, 26, 13); A(cr, DEEP, 0.92); cr.fill_preserve(); A(cr, col, 0.8); cr.stroke()
+                text(cr, lab, kx, ly, 13, IVORY, bold=True, anchor="c")
+
+            def setg(mx, my, i=i):
+                self.eq_set(i, max(-12.0, min(12.0, round((zero - my) / half * 12 * 2) / 2)))
+            self.hit(id, kx - 20, py0 - 14, 40, py1 - py0 + 28, press=setg, drag=setg, alt=lambda i=i: self.eq_set(i, 0.0),
+                     scroll=lambda d, i=i: self.eq_set(i, max(-12.0, min(12.0, eq["gains"][i] + d * 0.5))))
+        return y + h + 12
+
+    def page_astro(self, y):
+        a = self.cfg["astro"]
+        y = self.astro_canvas(y)
+        src = ["out", "mic"]; si = src.index(a["source"]) if a["source"] in src else 0
+
+        def sets(j):
+            a["source"] = src[j % 2]; self.save()
+        x0, x1, cy = self.row(y, "Listening To", el=5, info="Watch what you hear, or what your microphone hears.")
+        self.selector("asrc", x0, x1, cy, ["System output", "Microphone"][si], lambda: sets(si - 1), lambda: sets(si + 1))
+        y += 62
+        mi = a["smooth"]
+
+        def setm(j):
+            a["smooth"] = j % 3; self.save()
+        x0, x1, cy = self.row(y, "Motion", el=5, info="How quickly the stars fall back. Swift for drums, Dreamy for ambient.")
+        self.selector("asm", x0, x1, cy, SMOOTH[mi][0], lambda: setm(mi - 1), lambda: setm(mi + 1))
+        y += 62
+        y = self.section(y, "Speaker Trial")
+        sinks = self.st["sinks"]; opts = [None] + [s["name"] for s in sinks]; self.test_dev %= max(1, len(opts))
+        dev = opts[self.test_dev]
+        x0, x1, cy = self.row(y, "Trial Device", el=5, info="Which device plays the trial sounds.")
+        lab = "Default output" if dev is None else sinks[self.test_dev - 1]["desc"]
+        self.selector("tdev", x0, x1, cy, lab, lambda: setattr(self, "test_dev", (self.test_dev - 1) % len(opts)),
+                      lambda: setattr(self, "test_dev", (self.test_dev + 1) % len(opts)))
+        y += 62
+        x0, x1, cy = self.row(y, "Left · Both · Right", "Wind chimes per channel", el=5,
+                              info="Plays a short chime on one side at a time. If 'Left' comes from the right, "
+                                   "your speakers or cable are swapped.", cw=min(400, self.RW * 0.6))
+        bw = (x1 - x0 - 16) / 3
+        for k, (lab, side) in enumerate((("Left", "left"), ("Both", "both"), ("Right", "right"))):
+            self.gbutton(f"ch{side}", x0 + k * (bw + 8), cy - 20, bw, 40, lab,
+                         lambda s=side: POOL.submit(play_channel, s, dev), glyph="play", dark=True)
+        y += 62
+        x0, x1, cy = self.row(y, "Frequency Sweep", "20 Hz to 20 kHz in six seconds", el=5,
+                              info="A smooth glide across the whole audible range. Listen for rattles, sudden dips "
+                                   "or the moment your hearing (or your speaker) gives up.")
+        self.gbutton("sweep", x1 - 190, cy - 20, 190, 40, "Play sweep", lambda: POOL.submit(play_sweep, dev), glyph="wave", dark=True)
+        y += 62
+        x0, x1, cy = self.row(y, "Pink Noise", "Three seconds, equal energy per octave", el=5,
+                              info="The calibration sound engineers use. Every octave carries the same energy, so "
+                                   "a balanced system sounds even, like steady rain.")
+        self.gbutton("pink", x1 - 190, cy - 20, 190, 40, "Play noise", lambda: POOL.submit(play_pink, dev), glyph="wave", dark=True)
+        y += 62
+        x0, x1, cy = self.row(y, "Tone Generator", "Pure sine, two seconds", el=5,
+                              info="A single clean frequency. Low tones test the subwoofer, high tones test "
+                                   "tweeters and your ears.", cw=min(400, self.RW * 0.6))
+        ti = self.tone_i; f = TONES[ti]
+        self.selector("tone", x0, x0 + (x1 - x0) * 0.56, cy, f"{f / 1000:g} kHz" if f >= 1000 else f"{f} Hz",
+                      lambda: setattr(self, "tone_i", (ti - 1) % len(TONES)), lambda: setattr(self, "tone_i", (ti + 1) % len(TONES)))
+        self.gbutton("tplay", x0 + (x1 - x0) * 0.56 + 10, cy - 20, (x1 - x0) * 0.44 - 10, 40, "Play",
+                     lambda: POOL.submit(play_tone, f, dev), glyph="play", dark=True)
+        return y + 62
+
+    def astro_canvas(self, y):
+        cr, x, w = self.cr, self.CX0, self.RW; h = 350; N = Analyzer.N
+        rrect(cr, x, y, w, h, 14); A(cr, DEEP, 0.6); cr.fill_preserve(); A(cr, GOLD, 0.3); cr.set_line_width(1); cr.stroke()
+        cx, cy, R0, L = x + w / 2, y + h / 2, 84, 70
+        rot = self.t * 0.06
+        cr.set_line_width(1); A(cr, GOLD, 0.12); cr.new_path(); cr.arc(cx, cy, R0 + L + 12, 0, 2 * math.pi); cr.stroke()
+        for i in range(8):
+            a = rot + i * math.pi / 4
+            diamond(cr, cx + (R0 + L + 12) * math.cos(a), cy + (R0 + L + 12) * math.sin(a), 3); A(cr, GOLD, 0.4); cr.fill()
+        star(cr, cx, cy, R0 + L, 0.06, -rot * 0.5); A(cr, GOLD, 0.035); cr.fill()
+        for s in (0, 1):
+            sign = 1 if s == 1 else -1
+            for i in range(N):
+                ang = -math.pi / 2 + sign * (i + 0.5) / N * math.pi
+                v, p = self.sp[s][i], self.pk[s][i]; col = el_grad(i / (N - 1))
+                ca, sa = math.cos(ang), math.sin(ang); r1 = R0 + 6 + v * L
+                cr.set_line_cap(cairo.LINE_CAP_ROUND)
+                cr.set_line_width(11); A(cr, col, 0.10 + 0.15 * v); cr.move_to(cx + (R0 + 4) * ca, cy + (R0 + 4) * sa)
+                cr.line_to(cx + r1 * ca, cy + r1 * sa); cr.stroke()
+                cr.set_line_width(5.2); A(cr, col, 0.95); cr.move_to(cx + (R0 + 4) * ca, cy + (R0 + 4) * sa)
+                cr.line_to(cx + r1 * ca, cy + r1 * sa); cr.stroke()
+                rp = R0 + 14 + p * L
+                diamond(cr, cx + rp * ca, cy + rp * sa, 2.6); A(cr, GOLD_HI, 0.75); cr.fill()
+        g = cairo.RadialGradient(cx, cy - 20, 6, cx, cy, R0 - 6)
+        g.add_color_stop_rgba(0, 0.23, 0.26, 0.35, 0.98); g.add_color_stop_rgba(1, 0.12, 0.13, 0.19, 0.98)
+        cr.set_source(g); cr.new_path(); cr.arc(cx, cy, R0 - 6, 0, 2 * math.pi); cr.fill()
+        cr.set_line_width(1); A(cr, GOLD, 0.6); cr.new_path(); cr.arc(cx, cy, R0 - 6, 0, 2 * math.pi); cr.stroke()
+        for i in range(60):
+            a = i * math.pi / 30 - rot * 2; ln = 6 if i % 5 == 0 else 3
+            cr.move_to(cx + (R0 - 10) * math.cos(a), cy + (R0 - 10) * math.sin(a))
+            cr.line_to(cx + (R0 - 10 - ln) * math.cos(a), cy + (R0 - 10 - ln) * math.sin(a))
+            A(cr, GOLD, 0.45 if i % 5 == 0 else 0.2); cr.stroke()
+        db = self.an.peak_db
+        text(cr, f"{max(-60.0, db):.1f}" if db > -89 else "—", cx, cy - 8, 30, IVORY, bold=True, anchor="c")
+        text(cr, "dBFS peak", cx, cy + 20, 12.5, GOLD, anchor="c")
+        if db > -0.3:
+            text(cr, "Overload", cx, cy + 40, 12.5, DANGER, bold=True, anchor="c")
+        text(cr, "50 Hz", cx, cy - R0 - L - 24 if False else y + 18, 12, IVORY, 0.45, anchor="c")
+        text(cr, "7 kHz", cx, y + h - 18, 12, IVORY, 0.45, anchor="c")
+        for s, mx in ((0, x + 46), (1, x + w - 46)):
+            text(cr, "L" if s == 0 else "R", mx, y + 30, 16, GOLD_HI, bold=True, anchor="c")
+            n = 18; top, bot = y + 52, y + h - 30; seg = (bot - top) / n
+            for k in range(n):
+                on = self.lv[s] * n > k; c = EL[2][1] if k < 11 else EL[6][1] if k < 15 else EL[0][1]
+                yy = bot - (k + 1) * seg
+                rrect(cr, mx - 9, yy + 2, 18, seg - 4, 3); A(cr, c if on else NAVY3, 0.95 if on else 0.55); cr.fill()
+        lab = "Microphone" if self.an.target == "mic" else "System output"
+        text(cr, lab, x + 80, y + 30, 13, GOLD, 0.85)
+        return y + h + 12
+
+    def page_engine(self, y):
+        st, cfg = self.st, self.cfg; ck = st.get("clock", {}); info = st.get("info", {})
+        y = self.section(y, "Ley Line Clock")
+        rate = int(float(ck.get("clock.force-rate") or 0) or float(ck.get("clock.rate") or 48000))
+        q = int(float(ck.get("clock.force-quantum") or 0) or float(ck.get("clock.quantum") or 1024))
+        y = self.info_row(y, "Server", info.get("server_name", "unknown"), info=f"Protocol version {info.get('server_version', '?')}.", el=6)
+        y = self.info_row(y, "Native Format", info.get("default_sample_specification", ""), el=6,
+                          info="The format the server mixes in before converting for each device.")
+        y = self.info_row(y, "Clock Now", f"{rate / 1000:g} kHz  ·  quantum {q}  ·  {q / rate * 1000:.1f} ms", el=6,
+                          info="The live graph clock. Each cycle the server processes 'quantum' samples; that is "
+                               "the floor for your output latency.")
+        ri = RATES.index(cfg["force_rate"]) if cfg["force_rate"] in RATES else 0
+
+        def setr(j):
+            v = RATES[j % len(RATES)]; cfg["force_rate"] = v; self.save()
+            POOL.submit(set_clock, "clock.force-rate", v); self.toast("Sample rate: " + (f"{v / 1000:g} kHz" if v else "automatic"))
+        x0, x1, cy = self.row(y, "Force Sample Rate", "Lock the whole graph", el=6,
+                              info="Locks every device to one rate so nothing is resampled. Pick 44.1 kHz for "
+                                   "CD-quality music libraries, 48 kHz for games and video. Automatic lets PipeWire choose.")
+        self.selector("frate", x0, x1, cy, f"{RATES[ri] / 1000:g} kHz" if RATES[ri] else "Automatic", lambda: setr(ri - 1), lambda: setr(ri + 1))
+        y += 62
+        qi = QUANTA.index(cfg["force_quantum"]) if cfg["force_quantum"] in QUANTA else 0
+
+        def setq(j):
+            v = QUANTA[j % len(QUANTA)]; cfg["force_quantum"] = v; self.save()
+            POOL.submit(set_clock, "clock.force-quantum", v); self.toast("Quantum: " + (str(v) if v else "automatic"))
+        x0, x1, cy = self.row(y, "Force Quantum", "Buffer size per cycle", el=6,
+                              info="Smaller numbers mean lower latency (rhythm games, live monitoring, music "
+                                   "production) but more CPU wake-ups and a risk of crackles. 1024 is the relaxed default.")
+        lab = f"{QUANTA[qi]}  ·  {QUANTA[qi] / rate * 1000:.1f} ms" if QUANTA[qi] else "Automatic"
+        self.selector("fq", x0, x1, cy, lab, lambda: setq(qi - 1), lambda: setq(qi + 1))
+        y += 62
+        ai = next((k for k, (v, _) in enumerate(ALLOWED) if v == cfg["allowed_rates"]), 0)
+
+        def seta(j):
+            v = ALLOWED[j % len(ALLOWED)][0]; cfg["allowed_rates"] = v; self.save()
+            if v:
+                POOL.submit(set_clock, "clock.allowed-rates", v)
+            else:
+                POOL.submit(run, ["pw-metadata", "-n", "settings", "-d", "0", "clock.allowed-rates"])
+        x0, x1, cy = self.row(y, "Allowed Rates", "Follow the music's own rate", el=6,
+                              info="When a song arrives at 44.1 or 96 kHz, PipeWire may switch the hardware to "
+                                   "match it (bit-perfect), as long as the rate is in this list and nothing else is playing.")
+        self.selector("arate", x0, x1, cy, ALLOWED[ai][1], lambda: seta(ai - 1), lambda: seta(ai + 1))
+        y += 62
+        y = self.section(y, "Maintenance")
+        x0, x1, cy = self.row(y, "Restart Audio", "WirePlumber, PipeWire, pipewire-pulse", el=6,
+                              info="Restarts the whole sound stack. Fixes stuck Bluetooth, missing devices and "
+                                   "crackling. Every app reconnects within a second or two; your enchantments are re-applied.")
+        self.gbutton("restart", x1 - 190, cy - 20, 190, 40, "Restart", lambda: self.ask(
+            "Restart the sound stack?", "All audio stops for a moment while WirePlumber, PipeWire and pipewire-pulse "
+            "restart. Saved enchantments are re-applied afterwards.", "Restart", self.restart_stack), glyph="restart", dark=True)
+        y += 62
+        x0, x1, cy = self.row(y, "Re-apply Enchantments", "EQ, Mono, Co-op, Clear Voice, clock", el=6,
+                              info="Brings back everything that lives inside the server. Add "
+                                   "'exec-once = irminsul-settings --restore' to hyprland.conf to do this at login.")
+        self.gbutton("reapply", x1 - 190, cy - 20, 190, 40, "Re-apply",
+                     lambda: POOL.submit(lambda: (restore_all(), self.host.idle(lambda: (self.toast("Enchantments re-applied"), self.refresh())))),
+                     dark=True)
+        y += 62
+        mods = st.get("mods", [])
+        y = self.section(y, "Loaded Modules", f"{len(mods)} loaded")
+        for m in mods:
+            mine = "irminsul" in m["arg"]
+            x0, x1, cy = self.row(y, m["name"], m["arg"] or "no arguments", el=0 if mine else 6,
+                                  info=("Loaded by Irminsul. " if mine else "") + "A server module. Unloading one removes "
+                                       "whatever it created (a virtual device, a loopback...). Core modules may reload themselves.",
+                                  cw=150)
+            if mine:
+                diamond(cr := self.cr, x0 - 6, cy, 4); A(cr, EL[0][1]); cr.fill()
+            self.gbutton(f"unl:{m['idx']}", x1 - 130, cy - 18, 130, 36, "Unload", lambda m=m: self.ask(
+                f"Unload {m['name']}?", "Whatever this module created will disappear right away.", "Unload",
+                lambda: self.do(["pactl", "unload-module", str(m["idx"])], f"{m['name']} unloaded")), glyph="x", dark=True)
+            y += 62
+        return y
+
+    RESTART_SUB = {
+        "outputs": "Missing, silent or stuck output devices",
+        "inputs": "Microphone gone, silent or crackling",
+        "streams": "Apps stuck on the wrong device or not showing",
+        "profiles": "Bluetooth stuck, or a profile is missing",
+        "eq": "Equalizer not taking effect or crackling",
+        "astro": "Meters frozen, or no sound at all",
+    }
+
+    def maint_row(self, y):
+        y = self.section(y, "Maintenance")
+        x0, x1, cy = self.row(y, "Restart Audio", self.RESTART_SUB.get(self.page, "WirePlumber, PipeWire, pipewire-pulse"), el=6,
+                              info="Restarts the whole sound stack (WirePlumber, PipeWire, pipewire-pulse). Fixes stuck Bluetooth, "
+                                   "missing devices and crackling. Every app reconnects within a second or two; "
+                                   "your enchantments are re-applied.")
+        self.gbutton("restart", x1 - 190, cy - 20, 190, 40, "Restart", lambda: self.ask(
+            "Restart the sound stack?", "All audio stops for a moment while WirePlumber, PipeWire and pipewire-pulse "
+            "restart. Saved enchantments are re-applied afterwards.", "Restart", self.restart_stack), glyph="restart", dark=True)
+        return y + 62
+
+    def restart_stack(self):
+        self.toast("Restarting the sound stack…")
+
+        def job():
+            run(["systemctl", "--user", "restart", "wireplumber", "pipewire", "pipewire-pulse"])
+            time.sleep(2.0); restore_all(); self.rt.update(load_rt())
+            self.host.idle(lambda: (self.toast("The ley lines are flowing again"), self.refresh()))
+        POOL.submit(job)
+
+    def page_mixer(self, y):
+        cfg = self.cfg
+        y = self.section(y, "Popup")
+        pi = 0 if cfg["position"] == "center" else 1
+
+        def setpos(j):
+            cfg["position"] = ["center", "cursor"][j % 2]; self.save()
+        x0, x1, cy = self.row(y, "Opens At", info="Where the Resonance Mixer appears when you click the bar icon.")
+        self.selector("pos", x0, x1, cy, ["Centre of the screen", "Under the bar icon"][pi], lambda: setpos(pi - 1), lambda: setpos(pi + 1))
+        y += 62
+        x0, x1, cy = self.row(y, "Scroll Step", "Per wheel notch on the dial", info="How far one scroll notch "
+                              "moves the dial. Shift multiplies it by three, Ctrl makes it 1 %.")
+        self.slider("step", x0, x1, cy, cfg["scroll_step"], 1, 10, lambda v: (cfg.__setitem__("scroll_step", int(v)), self.save()))
+        y += 62
+        x0, x1, cy = self.row(y, "Safe Ceiling", "The dial can't go higher", info="Protects your ears and "
+                              "speakers: the popup's dial, scroll and keys never go past this value.")
+        self.slider("ceil", x0, x1, cy, cfg["ceiling"], 30, 100, lambda v: (cfg.__setitem__("ceiling", int(v)), self.save()))
+        y += 62
+        x0, x1, cy = self.row(y, "Boost Limit", "Highest gain in this archive", info="The top of the volume "
+                              "sliders on these pages. PulseAudio's classic maximum is 153 %.")
+        self.slider("blim", x0, x1, cy, cfg["boost_limit"], 100, 200, lambda v: (cfg.__setitem__("boost_limit", int(v)), self.save()),
+                    step=5, el=0)
+        y += 62
+        for key, title, sub, info in (
+                ("follow_streams", "Streams Follow", "Move playing apps on device switch",
+                 "When you pick another output, everything already playing moves with you."),
+                ("chime_on_switch", "Switch Chime", "Ring the wind chime on a new device",
+                 "A short chime confirms which device is now in use."),
+                ("show_mic", "Show Microphone", "In the popup", "Hide the microphone section if you never use it."),
+                ("show_apps", "Show Party Mixer", "In the popup", "Hide the per-app list for a smaller popup."),
+                ("reduced_motion", "Reduced Motion", "Calmer animations",
+                 "Slows the ambient animations of the popup and this archive.")):
+            x0, x1, cy = self.row(y, title, sub, info=info)
+            self.toggle(key, x1, cy, cfg[key], lambda k=key: (cfg.__setitem__(k, not cfg[k]), self.save()))
+            y += 62
+        y = self.section(y, "Quick Presets", "The four chips under the dial")
+        for i, (name, val) in enumerate(cfg["presets"]):
+            ni = PRESET_NAMES.index(name) if name in PRESET_NAMES else 0
+            x0, x1, cy = self.row(y, f"Chip {i + 1}", info="Name and volume of a quick preset. Click the chip in "
+                                  "the popup to jump straight to it.", el=[5, 2, 1, 0][i], cw=min(440, self.RW * 0.7))
+            mid = x0 + (x1 - x0) * 0.46
+
+            def setn(j, i=i):
+                cfg["presets"][i][0] = PRESET_NAMES[j % len(PRESET_NAMES)]; self.save()
+            self.selector(f"pn{i}", x0, mid - 10, cy, name, lambda ni=ni, s=setn: s(ni - 1), lambda ni=ni, s=setn: s(ni + 1))
+            self.slider(f"pv{i}", mid + 6, x1, cy, val, 0, 100,
+                        lambda v, i=i: (cfg["presets"][i].__setitem__(1, int(v)), self.save()), el=[5, 2, 1, 0][i])
+            y += 62
+        y = self.section(y, "Archive")
+        x0, x1, cy = self.row(y, "Reset Everything", "Back to factory resonance", info="Restores every setting in "
+                              "this archive to its default. Running enchantments keep running until you switch them off.")
+        self.gbutton("resetall", x1 - 190, cy - 20, 190, 40, "Reset", lambda: self.ask(
+            "Reset every setting?", "Popup behaviour, presets, EQ curve and clock choices go back to their defaults.",
+            "Reset", self.reset_all), glyph="x", dark=True)
+        return y + 62
+
+    def reset_all(self):
+        self.cfg = _merge(DEFAULTS, {}); save_cfg(self.cfg); self.toast("Everything is back to default")
+        self.rt.pop("coop_sel", None); self.rt.pop("coop_sync", None)
+
+    def page_night(self, y):
+        n = self.cfg["night"]; night = self.rt.get("night")
+        y = self.night_canvas(y, n, night)
+        mi = NIGHT_MIN.index(n["minutes"]) if n["minutes"] in NIGHT_MIN else 3
+
+        def setm(j):
+            n["minutes"] = NIGHT_MIN[j % len(NIGHT_MIN)]; self.save()
+        x0, x1, cy = self.row(y, "Duration", el=3, info="How long until the music is fully faded.")
+        self.selector("nmin", x0, x1, cy, f"{n['minutes']} minutes", lambda: setm(mi - 1), lambda: setm(mi + 1))
+        y += 62
+        ci = n["curve"]
+        x0, x1, cy = self.row(y, "Fade Curve", el=3, info="Linear drops evenly. Gentle falls fast first, then lingers "
+                              "quietly. Lullaby keeps the music full for most of the watch, then fades at the end.")
+        self.selector("ncur", x0, x1, cy, NIGHT_CURVE[ci], lambda: (n.__setitem__("curve", (ci - 1) % 3), self.save()),
+                      lambda: (n.__setitem__("curve", (ci + 1) % 3), self.save()))
+        y += 62
+        ai = n["action"]
+        x0, x1, cy = self.row(y, "When It Ends", el=3, info="Pausing uses playerctl (Spotify, browsers, mpv...). The "
+                              "volume is always restored afterwards, so the morning alarm is not silent.")
+        self.selector("nend", x0, x1, cy, NIGHT_END[ai], lambda: (n.__setitem__("action", (ai - 1) % 3), self.save()),
+                      lambda: (n.__setitem__("action", (ai + 1) % 3), self.save()))
+        y += 62
+        x0, x1, cy = self.row(y, "Keep Watch", "Runs even after you close this window", el=3,
+                              info="The watch is a tiny background process. Close the archive, lock the screen: it "
+                                   "keeps fading. Stop it here any time.")
+        if night:
+            self.gbutton("nstop", x1 - 200, cy - 20, 200, 40, "End the watch", self.night_stop, glyph="x", dark=True)
+        else:
+            self.gbutton("nstart", x1 - 200, cy - 20, 200, 40, "Begin the watch", self.night_start, glyph="moon", dark=True)
+        return y + 62
+
+    def night_canvas(self, y, n, night):
+        cr, x, w = self.cr, self.CX0, self.RW; h = 280
+        rrect(cr, x, y, w, h, 14)
+        g = cairo.LinearGradient(0, y, 0, y + h); g.add_color_stop_rgb(0, 0.10, 0.11, 0.19); g.add_color_stop_rgb(1, 0.17, 0.16, 0.27)
+        cr.set_source(g); cr.fill_preserve(); A(cr, GOLD, 0.3); cr.set_line_width(1); cr.stroke()
+        rng = random.Random(11)
+        for _ in range(46):
+            sx, sy = x + 14 + rng.random() * (w - 28), y + 14 + rng.random() * (h - 28); ph = rng.random() * 6
+            star(cr, sx, sy, 1.5 + rng.random() * 2.6, 0.3); A(cr, IVORY, 0.12 + 0.25 * (0.5 + 0.5 * math.sin(self.t * 1.3 + ph))); cr.fill()
+        cx, cy, R = x + w * 0.38, y + h / 2, 100
+        now = time.time()
+        if night:
+            f = min(1.0, (now - night["start"]) / night["dur"]); rem = max(0, night["start"] + night["dur"] - now)
+        else:
+            f, rem = 0.0, n["minutes"] * 60
+        cr.set_line_width(12); A(cr, NAVY3, 0.8); cr.new_path(); cr.arc(cx, cy, R, 0, 2 * math.pi); cr.stroke()
+        a0 = -math.pi / 2; a1 = a0 + (1 - f) * 2 * math.pi
+        if 1 - f > 0.002:
+            gl = cairo.LinearGradient(cx - R, cy - R, cx + R, cy + R)
+            gl.add_color_stop_rgb(0, *EL[3][1]); gl.add_color_stop_rgb(1, *EL[5][1])
+            cr.set_source(gl); cr.set_line_cap(cairo.LINE_CAP_ROUND); cr.new_path(); cr.arc(cx, cy, R, a0, a1); cr.stroke()
+        for i in range(12):
+            a = i * math.pi / 6
+            diamond(cr, cx + (R + 18) * math.cos(a), cy + (R + 18) * math.sin(a), 2.6 if i % 3 else 4); A(cr, GOLD, 0.6); cr.fill()
+        px, py = cx + R * math.cos(a1), cy + R * math.sin(a1)
+        star(cr, px, py, 11, 0.22, self.t * 0.5); A(cr, IVORY); cr.fill()
+        mm, ss = int(rem // 60), int(rem % 60)
+        text(cr, f"{mm}:{ss:02d}" if night else f"{n['minutes']} min", cx, cy - 8, 38, IVORY, bold=True, anchor="c")
+        text(cr, "until the music sleeps" if night else "ready to keep watch", cx, cy + 26, 13, GOLD, anchor="c")
+        if night:
+            text(cr, f"volume now {int(night['v0'] * night_curve(night['curve'], f))}%", cx, cy + 46, 12.5, IVORY, 0.6, anchor="c")
+        gx0, gx1, gy0, gy1 = x + w * 0.66, x + w - 34, y + 66, y + h - 70
+        text(cr, "Fade curve", gx0, y + 40, 13, GOLD_HI, bold=True)
+        cr.set_line_width(1); A(cr, GOLD, 0.25); cr.move_to(gx0, gy1); cr.line_to(gx1, gy1); cr.move_to(gx0, gy0); cr.line_to(gx0, gy1); cr.stroke()
+        c = night["curve"] if night else n["curve"]
+        cr.set_line_width(2.4); A(cr, EL[5][1])
+        for k in range(41):
+            fx_ = gx0 + (gx1 - gx0) * k / 40; fy = gy1 - (gy1 - gy0) * night_curve(c, k / 40)
+            (cr.move_to if k == 0 else cr.line_to)(fx_, fy)
+        cr.stroke()
+        dx, dy_ = gx0 + (gx1 - gx0) * f, gy1 - (gy1 - gy0) * night_curve(c, f)
+        diamond(cr, dx, dy_, 6); A(cr, IVORY); cr.fill()
+        text(cr, "now", gx0, gy1 + 18, 12, IVORY, 0.5); text(cr, "asleep", gx1, gy1 + 18, 12, IVORY, 0.5, anchor="r")
+        icon(cr, "moon", x + 54, y + 50, 34, GOLD, 0.7)
+        return y + h + 12
+
+    # ── frame ──
+    def draw(self, cr, W, H):
+        self.cr, self.W, self.H = cr, W, H
+        self.hits, self._info, self.modal = [], None, False
+        self.INFO_W = 340 if W >= 1240 else 300
+        self.IX0 = W - self.INFO_W - 34
+        self.CX0 = 292; self.CX1 = self.IX0 - 24; self.RW = self.CX1 - self.CX0 - 14
+        self.TOP, self.BOT = 120, H - 34
+        self.clip = (0, 0, W, H)
+        self.draw_bg()
+        self.hit("move", 14, 14, W - 130, 92, ret="move")
+        self.draw_header(); self.draw_nav()
+        view = (self.CX0 - 8, self.TOP, self.CX1 - self.CX0 + 8, self.BOT - self.TOP); self.view = view
+        cr.save(); cr.rectangle(*view); cr.clip(); self.clip = view
+        e = 1 - (1 - min(1.0, self.page_t / 0.24)) ** 3
+        sliding = e < 0.999
+        if sliding:
+            cr.push_group(); cr.translate((1 - e) * 22, 0)
+        y0 = self.TOP + 2 - self.scroll_s.get(self.page, 0)
+        yend = getattr(self, "page_" + self.page)(y0)
+        if self.page in self.RESTART_SUB:
+            yend = self.maint_row(yend)
+        self.content_h[self.page] = yend - y0
+        if sliding:
+            cr.pop_group_to_source(); cr.paint_with_alpha(e)
+        cr.restore(); self.clip = (0, 0, W, H)
+        ch, vh = self.content_h[self.page], view[3]
+        if ch > vh + 4:
+            sx = self.CX1 - 4; frac = vh / ch; th = max(40, vh * frac)
+            ty = self.TOP + (vh - th) * (self.scroll_s.get(self.page, 0) / max(1, ch - vh + 24))
+            rrect(cr, sx, self.TOP, 4, vh, 2); A(cr, NAVY3, 0.5); cr.fill()
+            rrect(cr, sx, ty, 4, th, 2); A(cr, GOLD_LO, 0.9); cr.fill()
+        self.draw_info()
+        self.draw_toast()
+        if self.dialog:
+            self.draw_dialog()
+        self.info = self._info
+
+    def draw_bg(self):
+        cr, W, H = self.cr, self.W, self.H
+        x, y, pw, ph = 10, 8, W - 20, H - 18
+        if getattr(self, "_bg_key", None) != (W, H):
+            surf = cr.get_target().create_similar(cairo.CONTENT_COLOR_ALPHA, W, H); c2 = cairo.Context(surf)
+            for i in range(8):
+                rrect(c2, x - i, y - i + 4, pw + 2 * i, ph + 2 * i, 22 + i); A(c2, (0, 0, 0), 0.05); c2.fill()
+            rrect(c2, x, y, pw, ph, 22)
+            g = cairo.LinearGradient(0, y, 0, y + ph); g.add_color_stop_rgb(0, 0.205, 0.228, 0.305); g.add_color_stop_rgb(1, 0.13, 0.145, 0.205)
+            c2.set_source(g); c2.fill_preserve(); A(c2, GOLD, 0.95); c2.set_line_width(1.8); c2.stroke()
+            self._bg_surf, self._bg_key = surf, (W, H)
+        cr.set_operator(cairo.OPERATOR_SOURCE); cr.set_source_surface(self._bg_surf, 0, 0); cr.paint(); cr.set_operator(cairo.OPERATOR_OVER)
+        # Irminsul watermark: a slow astrolabe behind everything
+        cx, cy, rot = W * 0.56, H * 0.6, self.t * (0.008 if self.cfg["reduced_motion"] else 0.02)
+        cr.save(); rrect(cr, x, y, pw, ph, 22); cr.clip()
+        for r, al in ((380, 0.05), (330, 0.035), (250, 0.05), (160, 0.03)):
+            cr.set_line_width(1); A(cr, GOLD, al); cr.new_path(); cr.arc(cx, cy, r, 0, 2 * math.pi); cr.stroke()
+        for i in range(96):
+            a = rot + i * math.pi / 48; ln = 14 if i % 8 == 0 else 6
+            cr.move_to(cx + 380 * math.cos(a), cy + 380 * math.sin(a)); cr.line_to(cx + (380 - ln) * math.cos(a), cy + (380 - ln) * math.sin(a))
+        A(cr, GOLD, 0.05); cr.stroke()
+        star(cr, cx, cy, 330, 0.08, -rot * 1.5); A(cr, GOLD, 0.025); cr.fill()
+        star(cr, cx, cy, 250, 0.1, rot * 2 + math.pi / 4); A(cr, GOLD, 0.02); cr.fill()
+        rng = random.Random(7)
+        for _ in range(40):
+            sx, sy = x + 18 + rng.random() * (pw - 36), y + 18 + rng.random() * (ph - 36); ph_ = rng.random() * 6
+            star(cr, sx, sy, 2 + rng.random() * 3.2, 0.25)
+            A(cr, GOLD, 0.04 + 0.07 * (0.5 + 0.5 * math.sin(self.t * 0.9 + ph_))); cr.fill()
+        cr.restore()
+        rrect(cr, x + 7, y + 7, pw - 14, ph - 14, 16); A(cr, GOLD, 0.28); cr.set_line_width(1); cr.stroke()
+        for cx_, cy_ in ((x + 7, y + 7), (x + pw - 7, y + 7), (x + 7, y + ph - 7), (x + pw - 7, y + ph - 7)):
+            diamond(cr, cx_, cy_, 4.6); A(cr, NAVY); cr.fill_preserve(); A(cr, GOLD); cr.set_line_width(1.2); cr.stroke()
+        mx = x + pw / 2
+        for dx in (-18, 18):
+            diamond(cr, mx + dx, y, 2.6); A(cr, GOLD); cr.fill()
+        diamond(cr, mx, y, 6.5); A(cr, NAVY); cr.fill_preserve(); A(cr, GOLD); cr.set_line_width(1.4); cr.stroke()
+        # rail between navigation and content
+        g = cairo.LinearGradient(0, 120, 0, H - 40)
+        g.add_color_stop_rgba(0, GOLD[0], GOLD[1], GOLD[2], 0); g.add_color_stop_rgba(0.5, GOLD[0], GOLD[1], GOLD[2], 0.35)
+        g.add_color_stop_rgba(1, GOLD[0], GOLD[1], GOLD[2], 0); cr.set_source(g); cr.set_line_width(1)
+        cr.move_to(274, 120); cr.line_to(274, H - 40); cr.stroke()
+
+    def draw_header(self):
+        cr, W = self.cr, self.W
+        cy = 62
+        g = cairo.RadialGradient(60, cy, 0, 60, cy, 34)
+        g.add_color_stop_rgba(0, GOLD[0], GOLD[1], GOLD[2], 0.35); g.add_color_stop_rgba(1, GOLD[0], GOLD[1], GOLD[2], 0)
+        cr.set_source(g); cr.new_path(); cr.arc(60, cy, 34, 0, 2 * math.pi); cr.fill()
+        icon(cr, "gear", 60, cy, 34, GOLD_HI)
+        star(cr, 60, cy, 7, 0.25, self.t * 0.5); A(cr, GOLD_HI); cr.fill()
+        text(cr, "Settings", 96, cy - 10, 30, IVORY, bold=True)
+        text(cr, "The Resonance Archive  ·  Irminsul", 98, cy + 20, 13, GOLD, 0.9)
+        ck = self.st.get("clock", {}); info = self.st.get("info", {})
+        try:
+            rate = int(float(ck.get("clock.force-rate") or 0) or float(ck.get("clock.rate") or 48000))
+            q = int(float(ck.get("clock.force-quantum") or 0) or float(ck.get("clock.quantum") or 1024))
+        except ValueError:
+            rate, q = 48000, 1024
+        srv = info.get("server_name", "")
+        m = re.search(r"PipeWire ([\d.]+)", srv)
+        srv = f"PipeWire {m.group(1)}" if m else ("PulseAudio" if srv else "Connecting…")
+        lab = f"{srv}   ·   {rate / 1000:g} kHz   ·   {q / rate * 1000:.1f} ms"
+        tw = measure(cr, lab, 13) + 40; px = W - 104 - tw
+        rrect(cr, px, cy - 17, tw, 34, 17); A(cr, DEEP, 0.5); cr.fill_preserve(); A(cr, GOLD, 0.35); cr.set_line_width(1); cr.stroke()
+        cr.new_path(); cr.arc(px + 18, cy, 4, 0, 2 * math.pi); A(cr, EL[4][1], 0.6 + 0.4 * math.sin(self.t * 2.4)); cr.fill()
+        text(cr, lab, px + 30, cy, 13, IVORY, 0.8)
+        hov = self.over(W - 82, cy - 24, 48, 48)
+        cr.new_path(); cr.arc(W - 58, cy, 22, 0, 2 * math.pi); A(cr, GOLD, 0.25 if hov else 0.0); cr.fill_preserve()
+        A(cr, GOLD_HI if hov else GOLD); cr.set_line_width(1.6); cr.stroke()
+        cr.new_path(); cr.arc(W - 58, cy, 17, 0, 2 * math.pi); A(cr, GOLD, 0.35); cr.set_line_width(1); cr.stroke()
+        icon(cr, "close", W - 58, cy, 22, GOLD_HI)
+        self.hit("close", W - 82, cy - 24, 48, 48, press=lambda *_: self.host.close())
+
+    def draw_nav(self):
+        cr = self.cr; x, w, h, gap = 34, 226, 58, 6; y0 = self.TOP
+        sel = PAGE_IDS.index(self.page); ty = y0 + sel * (h + gap)
+        self.nav_y = ty if self.nav_y is None else self.nav_y + (ty - self.nav_y) * min(1.0, self.dt * 16)
+        ny = self.nav_y
+        g = cairo.LinearGradient(x, 0, x + w, 0); g.add_color_stop_rgb(0, *IVORY); g.add_color_stop_rgb(1, *mix(IVORY, GOLD, 0.4))
+        rrect(cr, x, ny, w, h, h / 2); cr.set_source(g); cr.fill_preserve(); A(cr, GOLD, 0.9); cr.set_line_width(1.2); cr.stroke()
+        diamond(cr, x - 12, ny + h / 2, 5); A(cr, GOLD_HI); cr.fill()
+        for i, (pid, title, sub, ic, el) in enumerate(NAV):
+            yy = y0 + i * (h + gap); cy = yy + h / 2; on = i == sel
+            near = abs(ny - yy) < h * 0.5
+            hov = self.over(x, yy, w, h)
+            if hov and not on:
+                rrect(cr, x, yy, w, h, h / 2); A(cr, GOLD, 0.13); cr.fill()
+            cr.new_path(); cr.arc(x + 30, cy, 20, 0, 2 * math.pi); A(cr, INK if near else NAVY2); cr.fill_preserve()
+            A(cr, elc(el) if on else GOLD, 0.9 if on else 0.45); cr.set_line_width(1.4); cr.stroke()
+            icon(cr, ic, x + 30, cy, 20, elc(el) if on else GOLD_HI)
+            text(cr, title, x + 62, cy - 9, 15, INK if near else IVORY, bold=True, width=w - 74)
+            text(cr, sub, x + 62, cy + 11, 12, INK if near else IVORY, 0.7 if near else 0.45, width=w - 74)
+            self.hit(f"nav:{pid}", x, yy, w, h, press=lambda *_, p=pid: self.goto(p))
+
+    def draw_info(self):
+        cr = self.cr; x0, x1 = self.IX0, self.W - 34; y0, y1 = self.TOP - 2, self.H - 104; w = x1 - x0
+        rrect(cr, x0, y0, w, y1 - y0, 16); A(cr, DEEP, 0.5); cr.fill_preserve(); A(cr, GOLD, 0.4); cr.set_line_width(1); cr.stroke()
+        rrect(cr, x0 + 6, y0 + 6, w - 12, y1 - y0 - 12, 12); A(cr, GOLD, 0.12); cr.stroke()
+        page = next(n for n in NAV if n[0] == self.page)
+        title, desc, el = self.info or (page[1], PAGE_INFO[self.page], page[4])
+        el = page[4] if el is None else el
+        cx, ey = (x0 + x1) / 2, y0 + 82; c = elc(el); rot = self.t * 0.25
+        g = cairo.RadialGradient(cx, ey, 10, cx, ey, 70)
+        g.add_color_stop_rgba(0, c[0], c[1], c[2], 0.35); g.add_color_stop_rgba(1, c[0], c[1], c[2], 0)
+        cr.set_source(g); cr.new_path(); cr.arc(cx, ey, 70, 0, 2 * math.pi); cr.fill()
+        cr.set_line_width(1); A(cr, GOLD, 0.5); cr.new_path(); cr.arc(cx, ey, 54, 0, 2 * math.pi); cr.stroke()
+        for i in range(48):
+            a = rot + i * math.pi / 24; ln = 5 if i % 4 == 0 else 2.5
+            cr.move_to(cx + 54 * math.cos(a), ey + 54 * math.sin(a)); cr.line_to(cx + (54 - ln) * math.cos(a), ey + (54 - ln) * math.sin(a))
+        A(cr, GOLD, 0.5); cr.stroke()
+        for i in range(4):
+            a = -rot * 0.6 + i * math.pi / 2
+            diamond(cr, cx + 62 * math.cos(a), ey + 62 * math.sin(a), 3.6); A(cr, c); cr.fill()
+        cr.new_path(); cr.arc(cx, ey, 40, 0, 2 * math.pi); A(cr, NAVY); cr.fill_preserve(); A(cr, c, 0.9); cr.set_line_width(1.6); cr.stroke()
+        icon(cr, page[3], cx, ey, 34, GOLD_HI)
+        text(cr, title, cx, ey + 92, 20, IVORY, bold=True, anchor="c", width=w - 44)
+        ly = ey + 118
+        for side in (-1, 1):
+            g = cairo.LinearGradient(cx, 0, cx + side * (w / 2 - 30), 0)
+            g.add_color_stop_rgba(0, GOLD[0], GOLD[1], GOLD[2], 0.8); g.add_color_stop_rgba(1, GOLD[0], GOLD[1], GOLD[2], 0)
+            cr.set_source(g); cr.move_to(cx + side * 10, ly); cr.line_to(cx + side * (w / 2 - 30), ly); cr.stroke()
+        diamond(cr, cx, ly, 4.5); A(cr, c); cr.fill()
+        para(cr, desc, x0 + 28, ly + 20, 14, IVORY, 0.82, w - 56)
+        # ley line monitor
+        my = y1 - 128
+        rrect(cr, x0 + 18, my, w - 36, 110, 12); A(cr, NAVY2, 0.55); cr.fill_preserve(); A(cr, GOLD, 0.25); cr.stroke()
+        text(cr, "Ley Line Monitor", x0 + 36, my + 24, 13.5, GOLD_HI, bold=True)
+        text(cr, "Microphone" if self.an.target == "mic" else "Output", x1 - 36, my + 24, 12.5, IVORY, 0.55, anchor="r")
+        n = 22; bx0, bx1 = x0 + 62, x1 - 36; seg = (bx1 - bx0) / n
+        for s, yy in ((0, my + 56), (1, my + 82)):
+            text(cr, "LR"[s], x0 + 40, yy, 13, GOLD, bold=True)
+            for k in range(n):
+                on = self.lv[s] * n > k; col = el_grad(k / (n - 1))
+                rrect(cr, bx0 + k * seg, yy - 7, seg - 3, 14, 3); A(cr, col if on else NAVY3, 0.95 if on else 0.5); cr.fill()
+        # footer buttons
+        bw = (w - 12) / 2; by = self.H - 90
+        self.gbutton("openmix", x0, by, bw, 46, "Mixer", self.open_mixer)
+        self.gbutton("closeb", x0 + bw + 12, by, bw, 46, "Close", self.host.close, glyph="x")
+
+    def draw_toast(self):
+        age = self.t - self.toast_t
+        if age > 3.4 or not self.toast_msg:
+            return
+        cr = self.cr; a = min(1.0, age / 0.15, (3.4 - age) / 0.4)
+        tw = measure(cr, self.toast_msg, 14, True) + 70; cx = (self.CX0 + self.CX1) / 2
+        x, y = cx - tw / 2, self.H - 84 + (1 - a) * 10
+        rrect(cr, x, y, tw, 42, 21); A(cr, IVORY, 0.97 * a); cr.fill_preserve(); A(cr, GOLD_LO, a); cr.set_line_width(1.2); cr.stroke()
+        star(cr, x + 24, y + 21, 9, 0.22, self.t); A(cr, GOLD_LO, a); cr.fill()
+        text(cr, self.toast_msg, x + 42, y + 21, 14, INK, a, bold=True)
+
+    def draw_dialog(self):
+        cr, W, H, d = self.cr, self.W, self.H, self.dialog
+        a = 1 - (1 - min(1.0, (self.t - self.dialog_t) / 0.2)) ** 3
+        rrect(cr, 10, 8, W - 20, H - 18, 22); A(cr, DEEP, 0.66 * a); cr.fill()
+        self.modal = True
+        bw, bh = 600, 290; bx, by = (W - bw) / 2, (H - bh) / 2 + (1 - a) * 18
+        rrect(cr, bx, by, bw, bh, 16)
+        g = cairo.LinearGradient(0, by, 0, by + bh); g.add_color_stop_rgb(0, *IVORY); g.add_color_stop_rgb(1, *mix(IVORY, GOLD, 0.3))
+        cr.set_source(g); cr.fill_preserve(); A(cr, GOLD_LO); cr.set_line_width(2); cr.stroke()
+        rrect(cr, bx + 8, by + 8, bw - 16, bh - 16, 11); A(cr, GOLD_LO, 0.45); cr.set_line_width(1); cr.stroke()
+        for cx_, cy_ in ((bx + 8, by + 8), (bx + bw - 8, by + 8), (bx + 8, by + bh - 8), (bx + bw - 8, by + bh - 8)):
+            diamond(cr, cx_, cy_, 4.5); A(cr, INK); cr.fill()
+        star(cr, W / 2, by + 36, 12, 0.22, self.t * 0.4); A(cr, GOLD_LO); cr.fill()
+        text(cr, d["title"], W / 2, by + 72, 21, INK, bold=True, anchor="c", width=bw - 60)
+        for side in (-1, 1):
+            g = cairo.LinearGradient(W / 2, 0, W / 2 + side * 220, 0)
+            g.add_color_stop_rgba(0, GOLD_LO[0], GOLD_LO[1], GOLD_LO[2], 0.9); g.add_color_stop_rgba(1, GOLD_LO[0], GOLD_LO[1], GOLD_LO[2], 0)
+            cr.set_source(g); cr.set_line_width(1); cr.move_to(W / 2 + side * 8, by + 98); cr.line_to(W / 2 + side * 220, by + 98); cr.stroke()
+        diamond(cr, W / 2, by + 98, 4); A(cr, GOLD_LO); cr.fill()
+        para(cr, d["msg"], bx + 56, by + 116, 14.5, INK, 0.85, bw - 112)
+        self.hit("dlg", bx, by, bw, bh, press=lambda *_: None)
+
+        def ok():
+            self.dialog = None; d["on_ok"]()
+        self.gbutton("dcancel", bx + 50, by + bh - 76, 230, 48, "Cancel", lambda: setattr(self, "dialog", None), glyph="x", dark=True)
+        self.gbutton("dok", bx + bw - 280, by + bh - 76, 230, 48, d["ok"], ok, glyph="o", dark=True)
+        self.modal = False
+
+
+# ───────────────────────────── GTK host ─────────────────────────────
+class Watcher(threading.Thread):
+    def __init__(self, cb):
+        super().__init__(daemon=True); self.cb = cb; self.proc = None; self.stop = False
+
+    def run(self):
+        if DEMO:
+            return
+        while not self.stop:
+            try:
+                self.proc = subprocess.Popen(["pactl", "subscribe"], stdout=subprocess.PIPE, text=True)
+                for line in self.proc.stdout:
+                    if any(k in line for k in ("sink", "source", "server", "card", "module")) and "source-output" not in line:
+                        GLib.idle_add(self.cb)
+            except Exception:
+                pass
+            time.sleep(1)
+
+    def close(self):
+        self.stop = True
+        try:
+            self.proc.terminate()
+        except Exception:
+            pass
+
+
+if not PREVIEW:
+    class Window(Gtk.ApplicationWindow):
+        def __init__(self, app, page):
+            super().__init__(application=app, title="Irminsul Settings")
+            self.set_decorated(False); self.set_app_paintable(True)
+            scr = self.get_screen(); vis = scr.get_rgba_visual()
+            if vis is not None and scr.is_composited():
+                self.set_visual(vis)
+            W, H = 1320, 860
+            try:
+                mon = Gdk.Display.get_default().get_monitor(0).get_geometry()
+                W, H = min(W, mon.width - 60), min(H, mon.height - 60)
+            except Exception:
+                pass
+            _a = (Gdk.Display.get_default().get_primary_monitor() or Gdk.Display.get_default().get_monitor(0)).get_workarea(); self.set_default_size(min(max(1080, W), int(_a.width * 0.94)), min(max(660, H), int(_a.height * 0.9))); self.set_size_request(min(1080, int(_a.width * 0.5)), min(660, int(_a.height * 0.6)))
+            self.icons = {}
+            self.scene = Scene(self, page)
+            self.area = Gtk.DrawingArea(); self.area.set_can_focus(True)
+            self.area.add_events(Gdk.EventMask.BUTTON_PRESS_MASK | Gdk.EventMask.BUTTON_RELEASE_MASK |
+                                 Gdk.EventMask.POINTER_MOTION_MASK | Gdk.EventMask.SCROLL_MASK |
+                                 Gdk.EventMask.SMOOTH_SCROLL_MASK | Gdk.EventMask.LEAVE_NOTIFY_MASK)
+            self.area.connect("draw", lambda w, cr: (self.scene.draw(cr, w.get_allocated_width(), w.get_allocated_height()), False)[1])
+            self.area.connect("button-press-event", self.on_press)
+            self.area.connect("button-release-event", lambda w, e: self.scene.on_release(e.x, e.y))
+            self.area.connect("motion-notify-event", lambda w, e: self.scene.on_motion(e.x, e.y))
+            self.area.connect("leave-notify-event", lambda w, e: self.scene.on_leave())
+            self.area.connect("scroll-event", self.on_scroll)
+            self.connect("key-press-event", lambda w, e: (self.scene.on_key(Gdk.keyval_name(e.keyval) or ""), True)[1])
+            self.connect("destroy", lambda *_: (self.scene.close(), self.watcher.close()))
+            self.add(self.area)
+            self.watcher = Watcher(self.scene.on_event); self.watcher.start()
+            self.last = time.monotonic(); self.opened = self.last; self.set_opacity(0.0)
+            GLib.timeout_add(33, self.tick)
+
+        def tick(self):
+            now = time.monotonic(); dt = min(0.25, now - self.last); self.last = now
+            sc = self.scene
+            self._f = getattr(self, "_f", 0) + 1
+            busy = (now - sc.last_input < 1.5 or sc.page_t < 0.6 or sc.dialog or sc.active
+                    or sc.page == "astro" or now - self.opened < 0.5 or now - sc.toast_t_wall < 2.5)
+            if busy or self._f % 3 == 0:
+                sc.tick(dt); self.area.queue_draw()
+            else:
+                self.last = now - dt            # keep accumulating time so animations stay in sync
+            age = now - self.opened
+            if self.get_opacity() < 1.0:
+                self.set_opacity(min(1.0, age / 0.22))
+            return True
+
+        def on_press(self, w, e):
+            if e.type != Gdk.EventType.BUTTON_PRESS:
+                return True
+            if self.scene.on_press(e.x, e.y, e.button) == "move":
+                self.begin_move_drag(e.button, int(e.x_root), int(e.y_root), e.time)
+            return True
+
+        def on_scroll(self, w, e):
+            if e.direction == Gdk.ScrollDirection.UP:
+                dy = -1
+            elif e.direction == Gdk.ScrollDirection.DOWN:
+                dy = 1
+            else:
+                dy = e.get_scroll_deltas()[2]
+                if abs(dy) < 0.01:
+                    return True
+            self.scene.on_scroll(e.x, e.y, dy); return True
+
+        # host interface
+        def idle(self, fn):
+            GLib.idle_add(lambda: (fn(), False)[1])
+
+        def close(self):
+            self.destroy()
+
+        def app_icon(self, cr, names, cx, cy, size):
+            key = (tuple(names), size)
+            if key not in self.icons:
+                pix = None; theme = Gtk.IconTheme.get_default()
+                for n in names:
+                    try:
+                        if theme.has_icon(n):
+                            pix = theme.load_icon(n, size, 0); break
+                    except Exception:
+                        pass
+                self.icons[key] = pix
+            pix = self.icons[key]
+            if pix is None:
+                return False
+            Gdk.cairo_set_source_pixbuf(cr, pix, cx - pix.get_width() / 2, cy - pix.get_height() / 2); cr.paint()
+            return True
+
+    class App(Gtk.Application):
+        def __init__(self):
+            super().__init__(application_id="io.irminsul.Settings", flags=Gio.ApplicationFlags.HANDLES_COMMAND_LINE)
+            self.win = None
+
+        def do_command_line(self, cl):
+            args = cl.get_arguments()[1:]; page = None
+            if "--page" in args and args.index("--page") + 1 < len(args):
+                page = args[args.index("--page") + 1]
+            if self.win is None:
+                self.win = Window(self, page or "outputs"); self.win.show_all()
+            elif page in PAGE_IDS:
+                self.win.scene.goto(page)
+            self.win.present()
+            return 0
+
+
+def main():
+    a = sys.argv[1:]
+    if "--coop-control" in a:
+        i = a.index("--coop-control")
+        if i + 1 >= len(a) or a[i + 1] not in ("toggle", "pick"):
+            print(json.dumps(dict(ok=False, message="Invalid Co-op action"))); return
+        name = a[i + 2] if i + 2 < len(a) else None
+        print(json.dumps(coop_control(a[i + 1], name))); return
+    if "--restore" in a:
+        restore_all(); return
+    if "--night-watch" in a:
+        i = a.index("--night-watch"); night_watch(float(a[i + 1]), int(a[i + 2]), int(a[i + 3])); return
+    if PREVIEW:
+        return
+    GLib.set_prgname("irminsul-settings")
+    prov = Gtk.CssProvider(); prov.load_from_data(b"window { background: transparent; }")
+    Gtk.StyleContext.add_provider_for_screen(Gdk.Screen.get_default(), prov, Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION)
+    app = App()
+    signal.signal(signal.SIGINT, lambda *_: app.quit())
+    app.run([sys.argv[0]] + [x for x in a if x != "--demo"])
+
+
+if __name__ == "__main__":
+    main()

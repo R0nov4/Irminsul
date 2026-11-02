@@ -1,0 +1,255 @@
+/* Genshin Impact - Paimon Menu */
+
+configuration {
+    modi:                   "drun,filebrowser,window,run";
+    show-icons:             true;
+    display-drun:           "✦";
+    display-filebrowser:    "❖";
+    display-window:         "◈";
+    display-run:            "☾";
+    drun-display-format:    "{name}";
+    window-format:          "{w} · {c}";
+    font:                   "HYWenHei, Vazirmatn, Noto Sans CJK SC Bold 11";
+}
+
+* {
+    bg-main:            #262b39f5;
+    bg-deep:            #1c2130f5;
+    bg-card:            #3b4255e6;
+    cream:              #ece5d8ff;
+    ink:                #3b4255ff;
+    gold:               #d3bc8eff;
+    gold-hi:            #f4e8c1ff;
+    gold-dim:           #d3bc8e55;
+    gold-soft:          #d3bc8eb0;
+
+    background-color:   transparent;
+    text-color:         @cream;
+    margin:             0px;
+    padding:            0px;
+    spacing:            0px;
+}
+
+/* قاب بیرونی دوخطه، مثل پنجره‌های داخل بازی */
+window {
+    location:           center;
+    anchor:             center;
+    width:              980px;
+    height:             600px;
+    padding:            7px;
+    border:             2px solid;
+    border-color:       @gold;
+    border-radius:      20px;
+    background-color:   @bg-main;
+}
+
+mainbox {
+    orientation:        horizontal;
+    border:             1px solid;
+    border-color:       @gold-dim;
+    border-radius:      14px;
+    children:           [ "imgbox", "listbox" ];
+}
+
+/* ─────────── پنل چپ: آرت + دکمه‌های گرد + ساعت ─────────── */
+imgbox {
+    width:              460px;
+    orientation:        vertical;
+    border-radius:      13px 0px 0px 13px;
+    background-image:   linear-gradient(to bottom, #3b4255ff, #1c2130ff);
+    children:           [ "imgbody", "imgfoot" ];
+}
+
+imgbody {
+    orientation:        horizontal;
+    expand:             true;
+    padding:            22px 0px 0px 18px;
+    children:           [ "mode-switcher", "dummy" ];
+}
+
+dummy {
+    expand:             true;
+}
+
+mode-switcher {
+    orientation:        vertical;
+    expand:             false;
+    width:              54px;
+    spacing:            12px;
+}
+
+button {
+    padding:            11px 0px;
+    border:             1.5px solid;
+    border-color:       @gold-soft;
+    border-radius:      50%;
+    background-color:   #262b39e6;
+    text-color:         @gold-hi;
+    horizontal-align:   0.5;
+    vertical-align:     0.5;
+    font:               "HYWenHei, Vazirmatn, Noto Sans CJK SC Bold 14";
+    cursor:             pointer;
+}
+
+button selected {
+    background-color:   @cream;
+    text-color:         @ink;
+    border:             2px solid;
+    border-color:       @gold-hi;
+}
+
+imgfoot {
+    orientation:        vertical;
+    padding:            90px 26px 22px 26px;
+    spacing:            2px;
+    background-image:   linear-gradient(to bottom, #1c213000, #1c2130f2);
+    border-radius:      0px 0px 0px 13px;
+    children:           [ "textbox-time", "textbox-date", "textbox-tag" ];
+}
+
+textbox-time {
+    str:                "";
+    font:               "HYWenHei, Vazirmatn, Noto Sans CJK SC Bold 32";
+    text-color:         @gold-hi;
+}
+
+textbox-date {
+    str:                "";
+    font:               "HYWenHei, Vazirmatn, Noto Sans CJK SC Bold 11";
+    text-color:         @cream;
+}
+
+textbox-tag {
+    str:                "✦  Paimon · Best Companion";
+    font:               "HYWenHei, Vazirmatn, Noto Sans CJK SC Bold 9";
+    text-color:         @gold-soft;
+    padding:            8px 0px 0px 0px;
+}
+
+/* ─────────── پنل راست: جستجو + لیست ─────────── */
+listbox {
+    orientation:        vertical;
+    spacing:            12px;
+    padding:            20px 24px 16px 24px;
+    background-color:   @bg-main;
+    border-radius:      0px 13px 13px 0px;
+    border:             0px 0px 0px 1px solid;
+    border-color:       @gold-dim;
+    children:           [ "textbox-title", "inputbar", "message", "listview", "textbox-hint" ];
+}
+
+textbox-title {
+    expand:             false;
+    str:                "─────────  ✦  PAIMON  ✦  ─────────";
+    horizontal-align:   0.5;
+    font:               "HYWenHei, Vazirmatn, Noto Sans CJK SC Bold 10";
+    text-color:         @gold;
+}
+
+inputbar {
+    expand:             false;
+    spacing:            10px;
+    padding:            10px 16px;
+    border:             1.5px solid;
+    border-color:       @gold;
+    border-radius:      18px;
+    background-color:   @bg-card;
+    children:           [ "textbox-prompt-colon", "entry", "num-filtered-rows" ];
+}
+
+textbox-prompt-colon {
+    expand:             false;
+    str:                "✦";
+    text-color:         @gold-hi;
+}
+
+entry {
+    cursor:             text;
+    placeholder:        "Search Teyvat...";
+    placeholder-color:  #ece5d873;
+    text-color:         @cream;
+}
+
+num-filtered-rows {
+    expand:             false;
+    text-color:         @gold-soft;
+}
+
+message {
+    expand:             false;
+    padding:            9px 14px;
+    border:             1px solid;
+    border-color:       @gold-dim;
+    border-radius:      12px;
+    background-color:   #1c213099;
+}
+
+textbox {
+    text-color:         @gold-hi;
+    vertical-align:     0.5;
+}
+
+listview {
+    expand:             true;
+    columns:            1;
+    lines:              7;
+    cycle:              true;
+    dynamic:            true;
+    fixed-height:       true;
+    scrollbar:          true;
+    layout:             vertical;
+    spacing:            8px;
+}
+
+scrollbar {
+    width:              4px;
+    handle-width:       4px;
+    handle-color:       @gold;
+    background-color:   #d3bc8e22;
+    border-radius:      4px;
+    margin:             0px 0px 0px 10px;
+}
+
+element {
+    spacing:            14px;
+    padding:            9px 16px;
+    border:             1px solid;
+    border-color:       #d3bc8e40;
+    border-radius:      14px;
+    background-color:   @bg-card;
+    text-color:         @cream;
+    cursor:             pointer;
+}
+
+element normal.normal, element alternate.normal {
+    background-color:   @bg-card;
+    text-color:         @cream;
+}
+
+element selected.normal {
+    background-color:   @cream;
+    text-color:         @ink;
+    border:             1.5px solid;
+    border-color:       @gold;
+}
+
+element-icon {
+    size:               34px;
+    cursor:             inherit;
+}
+
+element-text {
+    vertical-align:     0.5;
+    horizontal-align:   0.0;
+    cursor:             inherit;
+    text-color:         inherit;
+    highlight:          bold underline;
+}
+
+textbox-hint {
+    expand:             false;
+    str:                "Enter  Confirm        Esc  Back        Ctrl+Tab  Switch";
+    horizontal-align:   1.0;
+    font:               "HYWenHei, Vazirmatn, Noto Sans CJK SC Bold 9";
+    text-color:         @gold-soft;
+}

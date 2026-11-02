@@ -1,0 +1,117 @@
+configuration {
+    show-icons:       true;
+    font:             "SDK_SC_Web, Vazirmatn, Noto Sans CJK SC Bold 11";
+    hover-select:     true;
+    me-select-entry:  "";
+    me-accept-entry:  "MousePrimary";
+}
+
+* {
+    bg-deep:          #161a24ee;
+    bg-card:          #262b39f8;
+    cream:            #ece5d8ff;
+    gold:             #d3bc8eff;
+    gold-hi:          #f4e8c1ff;
+    background-color: transparent;
+    text-color:       @cream;
+    margin:           0px;
+    padding:          0px;
+}
+
+window {
+    location:         center;
+    anchor:           center;
+    width:            520px;
+    height:           520px;
+    background-color: @bg-deep;
+    border:           2px solid;
+    border-color:     @gold;
+    border-radius:    18px;
+    padding:          4px;
+}
+
+mainbox {
+    border:           1px solid;
+    border-color:     rgba(211, 188, 142, 0.4);
+    border-radius:    14px;
+    background-color: @bg-deep;
+    expand:           true;
+    children:         [ "textbox-title", "message", "listview" ];
+}
+
+textbox-title {
+    expand:           false;
+    str:              "✦   LEAVE TEYVAT?   ✦";
+    horizontal-align: 0.5;
+    padding:          18px 0px 14px 0px;
+    background-color: #1c2130ff;
+    text-color:       @gold-hi;
+    font:             "SDK_SC_Web, Vazirmatn Bold 14";
+    border:           0px 0px 1.5px 0px solid;
+    border-color:     @gold;
+}
+
+message {
+    padding:          16px 28px;
+    background-color: @bg-card;
+    border:           0px;
+}
+
+textbox {
+    text-color:       @cream;
+    horizontal-align: 0.5;
+    vertical-align:   0.5;
+    font:             "SDK_SC_Web, Vazirmatn 11";
+}
+
+/* فیکس: ارتفاع پنجره دستیه (جای اضافه‌ی پایین)، پس به اندازه‌گیری rofi وابسته نیست
+   و هر ۴ ردیف همیشه جا می‌شن. lines بالاتر از تعداد ردیف‌هاست تا هیچ‌وقت اسکرول نشه. */
+listview {
+    expand:           true;
+    columns:          1;
+    lines:            6;
+    spacing:          10px;
+    padding:          16px 28px 16px 28px;
+    fixed-height:     true;
+    dynamic:          false;
+    scrollbar:        false;
+    cycle:            false;
+    scroll-method:    0;
+    background-color: @bg-deep;
+}
+
+element {
+    padding:          8px 22px 8px 14px;
+    spacing:          16px;
+    border-radius:    32px;
+    border:           1.5px solid;
+    border-color:     @gold;
+    background-color: @bg-card;
+    text-color:       @cream;
+    cursor:           pointer;
+}
+
+element normal.normal, element alternate.normal {
+    background-color: @bg-card;
+    text-color:       @cream;
+}
+
+element selected.normal {
+    background-color: @cream;
+    text-color:       #161a24ff;
+    border:           2px solid;
+    border-color:     @gold-hi;
+}
+
+element-icon {
+    size:             48px;
+    background-color: transparent;
+}
+
+element-text {
+    horizontal-align: 0.0;
+    vertical-align:   0.5;
+    text-color:       inherit;
+    cursor:           inherit;
+    font:             "SDK_SC_Web, Vazirmatn Bold 11";
+}

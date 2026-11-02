@@ -1,0 +1,13 @@
+# Build outputs (Releases artifacts)
+dist/
+
+# Caches and logs
+__pycache__/
+*.py[cod]
+*.log
+*.bak*
+.cache/
+
+# System and temporary files
+.DS_Store
+*.tmp

@@ -1,0 +1,15 @@
+#!/usr/bin/env bash
+# starts the Genshin polkit agent (idempotent; replaces any other agent of this session)
+AGENT="$HOME/.local/lib/genshin-polkit/agent.py"
+LOG="${XDG_RUNTIME_DIR:-/tmp}/genshin-polkit.log"
+for _ in $(seq 1 50); do      # autostart can fire before the compositor socket exists
+  [ -n "${WAYLAND_DISPLAY:-}" ] && [ -S "${XDG_RUNTIME_DIR:-/run/user/$UID}/$WAYLAND_DISPLAY" ] && break
+  sleep 0.2
+done
+pgrep -u "$UID" -f "[g]enshin-polkit/agent.py" >/dev/null && exit 0
+for pat in polkit-kde-authentication-agent polkit-gnome-authentication-agent hyprpolkitagent \
+           lxpolkit polkit-mate-authentication-agent xfce-polkit lxqt-policykit-agent soteria; do
+  pkill -u "$UID" -f "$pat" 2>/dev/null || true
+done
+sleep 0.3
+exec python3 "$AGENT" "$@" >>"$LOG" 2>&1

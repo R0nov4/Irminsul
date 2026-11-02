@@ -1,0 +1,13 @@
+[Unit]
+Description=Genshin splash day/night sync (for shutdown splash)
+After=local-fs.target
+Before=plymouth-poweroff.service plymouth-reboot.service plymouth-halt.service plymouth-kexec.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/lib/genshin-daynight/pick.sh /usr/share/plymouth/themes/genshin-loading
+ExecStop=/usr/lib/genshin-daynight/pick.sh /usr/share/plymouth/themes/genshin-loading
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,8 @@
+[Plymouth Theme]
+Name=Genshin Impact Loading (day/night)
+Description=Genshin Impact loading screen replica, light 06-18 / dark 18-06
+ModuleName=script
+
+[script]
+ImageDir=/usr/share/plymouth/themes/genshin-loading
+ScriptFile=/usr/share/plymouth/themes/genshin-loading/genshin-loading.script

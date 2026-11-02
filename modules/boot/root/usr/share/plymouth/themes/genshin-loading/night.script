@@ -1,0 +1,143 @@
+// Genshin Impact loading screen replica - Plymouth script (v5.2 Ultra-HD)
+Window.SetBackgroundTopColor(0.1137, 0.1098, 0.1294);
+Window.SetBackgroundBottomColor(0.1137, 0.1098, 0.1294);
+
+sw = Window.GetWidth();
+sh = Window.GetHeight();
+
+// همه‌ی تصاویر برای ارتفاع 1080 ساخته شدن
+ui = sh / 1080;
+if (ui > 2.5) { ui = 2.5; }
+if (ui < 0.4) { ui = 0.4; }
+
+fun fit(img, k) {
+    if (k > 0.95 && k < 1.05) { return img; }
+    return img.Scale(Math.Int(img.GetWidth() * k), Math.Int(img.GetHeight() * k));
+}
+
+// assets are rendered at 4x, so scale by k/4
+fun fitHi(img, k) {
+    return img.Scale(Math.Int(img.GetWidth() * k / 4), Math.Int(img.GetHeight() * k / 4));
+}
+
+// دو نشان بزرگ وسط (0 = پره‌ای/Weapons ، 1 = دروازه/Domains)
+emb_img[0] = fitHi(Image("n_emb_fan.png"), ui);
+emb_img[1] = fitHi(Image("n_emb_gate.png"), ui);
+for (n = 0; n < 2; n++) {
+    emb[n] = Sprite(emb_img[n]);
+    emb[n].SetPosition(Math.Int((sw - emb_img[n].GetWidth()) / 2), Math.Int(sh * 0.425 - emb_img[n].GetHeight() / 2), 10);
+    emb[n].SetOpacity(0);
+}
+
+// چهار متن (عنوان + توضیح): زوج‌ها با نشان پره‌ای، فردها با نشان دروازه
+for (n = 0; n < 4; n++) {
+    tip_img[n] = fit(Image("n_tip_" + n + ".png"), ui);
+    tip[n] = Sprite(tip_img[n]);
+    tip[n].SetPosition(Math.Int((sw - tip_img[n].GetWidth()) / 2), Math.Int(sh * 0.695), 10);
+    tip[n].SetOpacity(0);
+}
+
+// نوار ۷ المنت
+for (n = 0; n <= 56; n++) {
+    if (n < 10)
+        bname = "n_bar_0" + n + ".png";
+    else
+        bname = "n_bar_" + n + ".png";
+    bar_img[n] = fitHi(Image(bname), ui);
+}
+bar = Sprite(bar_img[0]);
+bar.SetPosition(Math.Int((sw - bar_img[0].GetWidth()) / 2), Math.Int(sh * 0.880), 10);
+bar.SetOpacity(0);
+
+// خط‌های ظریف دو طرف نوار (از لبه‌ی صفحه تا کنار آیکون‌ها)
+line_src = Image("n_line.png");
+lh = Math.Int(ui + 0.5);
+if (lh < 1) { lh = 1; }
+lw = Math.Int(sw / 2 - sh * 0.2235);
+if (lw < 1) { lw = 1; }
+line_l_img = line_src.Scale(lw, lh);
+line_r_img = line_src.Scale(lw, lh);
+line_l = Sprite(line_l_img);
+line_r = Sprite(line_r_img);
+line_l.SetPosition(0, Math.Int(sh * 0.915 - lh / 2), 10);
+line_r.SetPosition(sw - lw, Math.Int(sh * 0.915 - lh / 2), 10);
+line_l.SetOpacity(0);
+line_r.SetOpacity(0);
+
+global.tick = 0;
+global.real_prog = 0;
+global.cur_idx = 0;
+global.finishing = 0;
+global.fin_tick = 0;
+global.HOLD = 270;
+global.FADE = 25;
+
+fun refresh_callback() {
+    global.tick++;
+    cb_t = global.tick;
+
+    cb_in = cb_t / 20;
+    if (cb_in > 1) { cb_in = 1; }
+    cb_out = 1;
+
+    if (global.finishing == 0) {
+        cb_auto = cb_t / 300.0;
+        if (cb_auto > 0.92) { cb_auto = 0.92; }
+        cb_p = global.real_prog;
+        if (cb_auto > cb_p) { cb_p = cb_auto; }
+        cb_idx = Math.Int(cb_p * 56);
+        if (cb_idx > 56) { cb_idx = 56; }
+        if (cb_idx < global.cur_idx) { cb_idx = global.cur_idx; }
+        global.cur_idx = cb_idx;
+    } else {
+        global.fin_tick++;
+        cb_idx = global.cur_idx + Math.Int(global.fin_tick * 3);
+        if (cb_idx > 56) { cb_idx = 56; }
+        if (global.fin_tick > 26) {
+            cb_out = 1 - (global.fin_tick - 26) / 22;
+            if (cb_out < 0) { cb_out = 0; }
+        }
+    }
+    global.bar.SetImage(global.bar_img[cb_idx]);
+
+    // چرخش متن‌ها و نشان‌ها
+    cb_slot = Math.Int(cb_t / global.HOLD);
+    cb_ph = cb_t - cb_slot * global.HOLD;
+    cb_k = cb_slot - Math.Int(cb_slot / 4) * 4;
+    cb_a = 1;
+    if (cb_ph < global.FADE) { cb_a = cb_ph / global.FADE; }
+    cb_left = global.HOLD - cb_ph;
+    if (cb_left < global.FADE) { cb_a = cb_left / global.FADE; }
+    cb_a = cb_a * cb_in * cb_out;
+
+    for (cb_i = 0; cb_i < 4; cb_i++) {
+        if (cb_i == cb_k)
+            global.tip[cb_i].SetOpacity(cb_a);
+        else
+            global.tip[cb_i].SetOpacity(0);
+    }
+    cb_e = cb_k - Math.Int(cb_k / 2) * 2;
+    if (cb_e == 0) {
+        global.emb[0].SetOpacity(cb_a);
+        global.emb[1].SetOpacity(0);
+    } else {
+        global.emb[0].SetOpacity(0);
+        global.emb[1].SetOpacity(cb_a);
+    }
+
+    cb_f = cb_in * cb_out;
+    global.bar.SetOpacity(cb_f);
+    global.line_l.SetOpacity(cb_f);
+    global.line_r.SetOpacity(cb_f);
+}
+Plymouth.SetRefreshFunction(refresh_callback);
+
+fun boot_progress_cb(duration, progress) {
+    global.real_prog = progress;
+}
+Plymouth.SetBootProgressFunction(boot_progress_cb);
+
+fun status_cb(status) {
+    if (status == "finish") { global.finishing = 1; }
+}
+Plymouth.SetUpdateStatusFunction(status_cb);

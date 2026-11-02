@@ -1,0 +1,25 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 96 96" width="96" height="96">
+  <defs>
+    <radialGradient id="disc" cx="48" cy="40" r="48" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#4d566d"/>
+      <stop offset="1" stop-color="#262b3a"/>
+    </radialGradient>
+    <radialGradient id="aura" cx="48" cy="48" r="34" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#ece5d8" stop-opacity="0.38"/>
+      <stop offset="1" stop-color="#ece5d8" stop-opacity="0"/>
+    </radialGradient>
+  </defs>
+  <circle cx="48" cy="48" r="42" fill="url(#disc)" stroke="#ece5d8" stroke-width="2.4"/>
+  <circle cx="48" cy="48" r="36.5" fill="none" stroke="#ece5d8" stroke-width="0.9" opacity="0.5"/>
+  <circle cx="48" cy="48" r="36" fill="url(#aura)"/>
+  <g fill="#ece5d8">
+    <polygon points="48,1.5 51.5,6 48,10.5 44.5,6"/>
+    <polygon points="94.5,48 90,51.5 85.5,48 90,44.5"/>
+    <polygon points="48,94.5 44.5,90 48,85.5 51.5,90"/>
+    <polygon points="1.5,48 6,44.5 10.5,48 6,51.5"/>
+  </g>
+  <g transform="translate(0,4)">
+<path fill="#ece5d8" d="M26 26 H70 Q74 26 74 30 V54 Q74 58 70 58 H46 L34 68 V58 H26 Q22 58 22 54 V30 Q22 26 26 26 Z"/>
+<g fill="#8b6bd0"><circle cx="38" cy="42" r="3.2"/><circle cx="48" cy="42" r="3.2"/><circle cx="58" cy="42" r="3.2"/></g>
+  </g>
+</svg>

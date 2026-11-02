@@ -1,0 +1,187 @@
+[global]
+    monitor = 0
+    follow = mouse
+
+    # بنر گوشه راست بالا، زیر Waybar
+    width = (340, 440)
+    height = (0, 170)
+    origin = top-right
+    offset = (18, 56)
+    scale = 0
+    notification_limit = 4
+
+    # نوار پیشرفت طلایی (OSD صدا/نور)
+    progress_bar = true
+    progress_bar_height = 8
+    progress_bar_frame_width = 0
+    progress_bar_min_width = 200
+    progress_bar_max_width = 360
+    progress_bar_corner_radius = 4
+
+    indicate_hidden = yes
+    transparency = 0
+    separator_height = 0
+    padding = 12
+    horizontal_padding = 14
+    text_icon_padding = 14
+
+    # پنل شبیه منوی بازی: لبه نازک طلایی، گوشه گرد
+    frame_width = 1
+    frame_color = "#d3bc8e"
+    gap_size = 8
+    separator_color = frame
+    corner_radius = 18
+    sort = yes
+
+    font = SDK_SC_Web, Vazirmatn, Noto Sans CJK SC Bold 10
+    line_height = 2
+    markup = full
+
+    # عنوان کوچک طلایی + تیتر درشت کرم + متن
+    format = "<span foreground='#d3bc8e' size='small'>✦  %a</span>\n<span foreground='#ece5d8' size='large'><b>%s</b></span>\n<span foreground='#c9c2b4' size='small'>%b</span>"
+    alignment = left
+    vertical_alignment = center
+    show_age_threshold = 60
+    ellipsize = end
+    ignore_newline = no
+    stack_duplicates = true
+    hide_duplicate_count = false
+    show_indicators = no
+
+    # آیکون بزرگ مثل اسلات آیتم
+    enable_recursive_icon_lookup = true
+    icon_theme = "Papirus-Dark,Adwaita,hicolor"
+    icon_position = left
+    min_icon_size = 64
+    max_icon_size = 64
+    icon_corner_radius = 0
+
+    sticky_history = yes
+    history_length = 30
+
+    mouse_left_click = close_current
+    mouse_middle_click = do_action, close_current
+    mouse_right_click = close_all
+
+[urgency_low]
+    background = "#2a3040f0"
+    foreground = "#ece5d8"
+    frame_color = "#d3bc8e88"
+    highlight = "#78cdb2"
+    default_icon = "@HOME@/.config/dunst-genshin/icons/info.png"
+    timeout = 4
+
+[urgency_normal]
+    background = "#3b4255f5"
+    foreground = "#ece5d8"
+    frame_color = "#d3bc8e"
+    highlight = "#d3bc8e"
+    default_icon = "@HOME@/.config/dunst-genshin/icons/achievement.png"
+    timeout = 6
+
+[urgency_critical]
+    background = "#3a2430f8"
+    foreground = "#fff1e6"
+    frame_color = "#f08a4a"
+    highlight = "#f08a4a"
+    default_icon = "@HOME@/.config/dunst-genshin/icons/critical.png"
+    timeout = 0
+
+# ── آیکون اختصاصی هر نوع اعلان (قانون‌های پایین‌تر روی بالاتر اولویت دارن) ──
+[volume]
+    summary = "*olume*"
+    new_icon = "@HOME@/.config/dunst-genshin/icons/volume.png"
+
+[brightness]
+    summary = "*rightness*"
+    new_icon = "@HOME@/.config/dunst-genshin/icons/brightness.png"
+
+[battery]
+    summary = "*attery*"
+    new_icon = "@HOME@/.config/dunst-genshin/icons/battery.png"
+
+[network]
+    summary = "*etwork*"
+    new_icon = "@HOME@/.config/dunst-genshin/icons/network.png"
+
+[wifi]
+    appname = "nm-applet"
+    new_icon = "@HOME@/.config/dunst-genshin/icons/network.png"
+
+[update]
+    summary = "*pdate*"
+    new_icon = "@HOME@/.config/dunst-genshin/icons/update.png"
+
+[screenshot]
+    summary = "*creenshot*"
+    new_icon = "@HOME@/.config/dunst-genshin/icons/screenshot.png"
+
+[spotify]
+    appname = "Spotify"
+    new_icon = "@HOME@/.config/dunst-genshin/icons/media.png"
+
+[player]
+    appname = "playerctl"
+    new_icon = "@HOME@/.config/dunst-genshin/icons/media.png"
+
+[telegram]
+    appname = "Telegram*"
+    new_icon = "@HOME@/.config/dunst-genshin/icons/message.png"
+
+[discord]
+    appname = "*iscord*"
+    new_icon = "@HOME@/.config/dunst-genshin/icons/message.png"
+
+# >>> genshin-osd v2
+[genshin_osd_vol]
+    stack_tag = "genshin-osd-vol"
+    format = "%a"
+    background = "#00000000"
+    foreground = "#00000000"
+    frame_color = "#00000000"
+    frame_width = 0
+    padding = 0
+    horizontal_padding = 0
+    text_icon_padding = 0
+    corner_radius = 0
+    icon_position = left
+    min_icon_size = 460
+    max_icon_size = 460
+    progress_bar = false
+    timeout = 2
+
+[genshin_osd_mute]
+    stack_tag = "genshin-osd-mute"
+    format = "%a"
+    background = "#00000000"
+    foreground = "#00000000"
+    frame_color = "#00000000"
+    frame_width = 0
+    padding = 0
+    horizontal_padding = 0
+    text_icon_padding = 0
+    corner_radius = 0
+    icon_position = left
+    min_icon_size = 460
+    max_icon_size = 460
+    progress_bar = false
+    timeout = 2
+
+[genshin_osd_bri]
+    stack_tag = "genshin-osd-bri"
+    format = "%a"
+    background = "#00000000"
+    foreground = "#00000000"
+    frame_color = "#00000000"
+    frame_width = 0
+    padding = 0
+    horizontal_padding = 0
+    text_icon_padding = 0
+    corner_radius = 0
+    icon_position = left
+    min_icon_size = 460
+    max_icon_size = 460
+    progress_bar = false
+    timeout = 2
+
+# <<< genshin-osd v2

@@ -1,0 +1,9 @@
+[Unit]
+Description=Genshin splash: pick day/night variant
+DefaultDependencies=no
+Before=plymouth-start.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/lib/genshin-daynight/pick.sh /usr/share/plymouth/themes/genshin-loading

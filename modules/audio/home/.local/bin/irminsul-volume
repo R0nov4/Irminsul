@@ -1,0 +1,1331 @@
+#!/usr/bin/env python3
+"""
+irminsul-volume  —  Resonance Mixer
+A Genshin-styled audio popup for Waybar + Hyprland (GTK3, Cairo, gtk-layer-shell).
+
+  * Seven-element resonance dial   drag / scroll / click-centre to mute
+  * Output devices                 click a card to switch (streams follow)
+  * Party mixer                    per-application volume + mute, live
+  * Microphone                     volume + mute
+  * Presets and a test chime
+  * Reacts to the audio that is actually playing (real level meter)
+
+Everything is drawn as vector art with Cairo: no game assets are shipped.
+Fonts come from fontconfig (HYWenHei-85W / SDK_SC_Web if installed).
+
+Deps (Arch): python-gobject python-cairo gtk3 gtk-layer-shell libpulse
+             (pipewire-pulse or pulseaudio provides the server)
+Usage:       irminsul-volume          # open; run again to close
+"""
+import os, sys, glob, json, math, time, signal, random, array, subprocess, threading, shlex, shutil
+from concurrent.futures import ThreadPoolExecutor
+
+PIDF = os.path.join(os.environ.get("XDG_RUNTIME_DIR", "/tmp"), "irminsul-volume.pid")
+
+
+def _toggle_existing():
+    """If a popup is already open, close it and report True (toggle behaviour)."""
+    try:
+        pid = int(open(PIDF).read().strip())
+        if pid == os.getpid():
+            return False
+        with open(f"/proc/{pid}/cmdline", "rb") as f:
+            if b"irminsul-volume" not in f.read():
+                return False
+        os.kill(pid, signal.SIGTERM)
+        return True
+    except Exception:
+        return False
+
+
+if _toggle_existing():
+    sys.exit(0)
+
+
+def _preload_layer_shell():
+    """gtk-layer-shell must be loaded before libwayland-client: re-exec once with LD_PRELOAD."""
+    if os.environ.get("IRMINSUL_NO_REEXEC") or "gtk-layer-shell" in os.environ.get("LD_PRELOAD", ""):
+        return
+    if not os.environ.get("WAYLAND_DISPLAY"):
+        return
+    for pat in ("/usr/lib/libgtk-layer-shell.so*", "/usr/lib64/libgtk-layer-shell.so*",
+                "/usr/lib/*/libgtk-layer-shell.so*"):
+        hits = sorted(glob.glob(pat))
+        if hits:
+            env = dict(os.environ, IRMINSUL_NO_REEXEC="1",
+                       LD_PRELOAD=":".join(filter(None, [hits[0], os.environ.get("LD_PRELOAD", "")])))
+            os.execvpe(sys.executable, [sys.executable] + sys.argv, env)
+
+
+_preload_layer_shell()
+
+import gi
+gi.require_version("Gtk", "3.0")
+gi.require_version("Gdk", "3.0")
+gi.require_version("Pango", "1.0")
+gi.require_version("PangoCairo", "1.0")
+from gi.repository import Gtk, Gdk, GLib, Pango, PangoCairo
+import cairo
+
+try:
+    gi.require_version("GtkLayerShell", "0.1")
+    from gi.repository import GtkLayerShell as LS
+except Exception:
+    LS = None
+
+# ───────────────────────────── palette ─────────────────────────────
+def hx(h):
+    h = h.lstrip("#")
+    return tuple(int(h[i:i + 2], 16) / 255 for i in (0, 2, 4))
+
+
+def mix(a, b, t):
+    return tuple(a[i] * (1 - t) + b[i] * t for i in range(3))
+
+
+GOLD, GOLD_HI, GOLD_LO = hx("D3BC8E"), hx("F3E7C4"), hx("A38B5A")
+IVORY, INK = hx("ECE5D8"), hx("3B4255")
+NAVY, NAVY2, NAVY3 = hx("2B3042"), hx("383E54"), hx("4A5169")
+MUTE_C, DANGER = hx("8A8D99"), hx("E5675A")
+# Order matches the seven Elemental Workspaces: Super+1 … Super+7
+ELEMENTS = [("Pyro", "EF7938"), ("Hydro", "33BEFF"), ("Anemo", "66E6BD"), ("Electro", "B58AE0"),
+            ("Dendro", "A5C83B"), ("Cryo", "98C8E8"), ("Geo", "F8BA4E")]
+EL = [(n, hx(c)) for n, c in ELEMENTS]
+FONT = "HYWenHei-85W,SDK_SC_Web,Noto Sans,Sans"
+
+START, SWEEP = 0.75 * math.pi, 1.5 * math.pi          # dial opens at the bottom
+SEG, GAP = SWEEP / 7, 0.05
+WIDTH = 396
+# Where the popup opens: "center" (default, middle of the focused monitor) or "cursor" (under the clicked icon)
+CENTER = os.environ.get("IRMINSUL_POS", "center").lower() != "cursor"
+POOL = ThreadPoolExecutor(max_workers=4)
+COMMANDS = ThreadPoolExecutor(max_workers=1)  # preserve drag/mute/routing command order
+
+
+# ───────────────────────────── drawing helpers ─────────────────────────────
+def A(cr, c, a=1.0):
+    cr.set_source_rgba(c[0], c[1], c[2], a)
+
+
+def rrect(cr, x, y, w, h, r):
+    cr.new_sub_path()
+    cr.arc(x + w - r, y + r, r, -math.pi / 2, 0)
+    cr.arc(x + w - r, y + h - r, r, 0, math.pi / 2)
+    cr.arc(x + r, y + h - r, r, math.pi / 2, math.pi)
+    cr.arc(x + r, y + r, r, math.pi, 1.5 * math.pi)
+    cr.close_path()
+
+
+def diamond(cr, x, y, r):
+    cr.move_to(x, y - r); cr.line_to(x + r, y); cr.line_to(x, y + r); cr.line_to(x - r, y); cr.close_path()
+
+
+def star(cr, x, y, r, k=0.22, rot=0.0):
+    for i in range(8):
+        rad = r if i % 2 == 0 else r * k
+        a = rot + i * math.pi / 4 - math.pi / 2
+        (cr.move_to if i == 0 else cr.line_to)(x + rad * math.cos(a), y + rad * math.sin(a))
+    cr.close_path()
+
+
+def _layout(cr, s, size, bold, width=None):
+    lay = PangoCairo.create_layout(cr)
+    fd = Pango.FontDescription()
+    fd.set_family(FONT)
+    fd.set_absolute_size(size * Pango.SCALE)
+    fd.set_weight(Pango.Weight.BOLD if bold else Pango.Weight.NORMAL)
+    lay.set_font_description(fd)
+    lay.set_text(s, -1)
+    if width:
+        lay.set_width(int(width * Pango.SCALE))
+        lay.set_ellipsize(Pango.EllipsizeMode.END)
+    return lay
+
+
+def measure(cr, s, size, bold=False):
+    return _layout(cr, s, size, bold).get_pixel_size()[0]
+
+
+def text(cr, s, x, y, size, col, a=1.0, bold=False, anchor="l", width=None):
+    lay = _layout(cr, s, size, bold, width)
+    w, h = lay.get_pixel_size()
+    ox = x - (w if anchor == "r" else w / 2 if anchor == "c" else 0)
+    cr.move_to(ox, y - h / 2)
+    A(cr, col, a)
+    PangoCairo.show_layout(cr, lay)
+    return w
+
+
+def icon(cr, kind, x, y, s, col, a=1.0, muted=False):
+    """Vector icons on a 24-unit grid centred on (x, y)."""
+    cr.save()
+    cr.translate(x, y); cr.scale(s / 24.0, s / 24.0)
+    A(cr, col, a)
+    cr.set_line_cap(cairo.LINE_CAP_ROUND); cr.set_line_join(cairo.LINE_JOIN_ROUND)
+    if kind == "speaker":
+        cr.move_to(-10, -4); cr.line_to(-5, -4); cr.line_to(1, -9); cr.line_to(1, 9)
+        cr.line_to(-5, 4); cr.line_to(-10, 4); cr.close_path(); cr.fill()
+        cr.set_line_width(2.2)
+        if not muted:
+            for r in (5.5, 10):
+                cr.new_path(); cr.arc(1, 0, r, -0.85, 0.85); cr.stroke()
+        else:
+            A(cr, DANGER, a); cr.set_line_width(2.4)
+            cr.move_to(6, -4.5); cr.line_to(12, 4.5); cr.move_to(12, -4.5); cr.line_to(6, 4.5); cr.stroke()
+    elif kind == "mic":
+        rrect(cr, -3.8, -11, 7.6, 14, 3.8); cr.fill()
+        cr.set_line_width(2.2)
+        cr.new_path(); cr.arc(0, -1, 7.5, 0, math.pi); cr.stroke()
+        cr.move_to(0, 6.5); cr.line_to(0, 11); cr.move_to(-4, 11); cr.line_to(4, 11); cr.stroke()
+    elif kind == "headphones":
+        cr.set_line_width(2.4)
+        cr.new_path(); cr.arc(0, 1, 8.5, math.pi, 2 * math.pi); cr.stroke()
+        rrect(cr, -11, 1, 5.5, 10, 2.2); cr.fill(); rrect(cr, 5.5, 1, 5.5, 10, 2.2); cr.fill()
+    elif kind == "monitor":
+        cr.set_line_width(2.2)
+        rrect(cr, -10.5, -8.5, 21, 14, 2.2); cr.stroke()
+        cr.move_to(0, 6); cr.line_to(0, 10); cr.move_to(-5, 10.5); cr.line_to(5, 10.5); cr.stroke()
+    elif kind == "close":
+        cr.set_line_width(2.2)
+        cr.move_to(-6, -6); cr.line_to(6, 6); cr.move_to(6, -6); cr.line_to(-6, 6); cr.stroke()
+    if muted and kind in ("mic", "headphones", "monitor"):
+        A(cr, DANGER, a); cr.set_line_width(2.6)
+        cr.move_to(-10, 10); cr.line_to(10, -10); cr.stroke()
+    cr.restore()
+
+
+# ───────────────────────────── audio backend (pactl) ─────────────────────────────
+def sh(*cmd, timeout=3):
+    try:
+        return subprocess.run(cmd, capture_output=True, text=True, timeout=timeout).stdout
+    except Exception:
+        return ""
+
+
+def run(cmd):
+    try:
+        p = subprocess.run(cmd, capture_output=True, text=True, timeout=5)
+        if p.returncode:
+            print(f"Audio command failed: {p.stderr.strip()}", file=sys.stderr)
+        return p.returncode == 0
+    except Exception as e:
+        print(f"Audio command failed: {e}", file=sys.stderr)
+        return False
+
+
+def internal_stream(a):
+    driver = str(a.get("driver", "")).lower()
+    return any(k in driver for k in ("combine", "loopback", "remap", "filter")) or (
+        a.get("client") is None and a.get("owner_module") is not None)
+
+
+def coop_state():
+    cfg = {}
+    try:
+        path = os.path.join(os.environ.get("XDG_CONFIG_HOME", os.path.expanduser("~/.config")),
+                            "irminsul-volume", "settings.json")
+        with open(path) as f:
+            cfg = json.load(f)
+    except (OSError, ValueError):
+        pass
+    result = dict(active=False, name="", names=[], members=[], selected=cfg.get("coop_devices"))
+    for m in pj("modules"):
+        if m.get("name") != "module-combine-sink":
+            continue
+        try:
+            args = dict(x.split("=", 1) for x in shlex.split(m.get("argument") or "") if "=" in x)
+        except ValueError:
+            continue
+        if str(args.get("sink_name", "")).startswith("irminsul_coop"):
+            members = [x for x in args.get("slaves", "").split(",") if x]
+            if result["active"]:
+                result["members"] = sorted(set(result["members"]) | set(members))
+                result["names"].append(args["sink_name"])
+            else:
+                result.update(active=True, name=args["sink_name"], members=members, names=[args["sink_name"]])
+    return result
+
+
+def coop_command(action, name=None):
+    here = os.path.dirname(os.path.abspath(__file__))
+    path = next((p for p in (os.path.join(here, "irminsul-settings.py"),
+                             os.path.join(here, "irminsul-settings"), shutil.which("irminsul-settings"))
+                 if p and os.path.isfile(p)), None)
+    if not path:
+        return "Install the updated irminsul-settings beside this file or on PATH"
+    env = dict(os.environ)
+    env.pop("IRMINSUL_NO_REEXEC", None)
+    pre = [s for s in env.get("LD_PRELOAD", "").split(":") if s and "gtk-layer-shell" not in s]
+    if pre:
+        env["LD_PRELOAD"] = ":".join(pre)
+    else:
+        env.pop("LD_PRELOAD", None)
+    try:
+        p = subprocess.run([sys.executable, path, "--coop-control", action] + ([name] if name else []),
+                           capture_output=True, text=True, env=env, timeout=40)
+        if p.returncode:
+            return "Co-op failed: " + (p.stderr.strip()[-160:] or str(p.returncode))
+        return json.loads(p.stdout)["message"]
+    except Exception as e:
+        return f"Co-op failed: {e}"
+
+
+def pj(kind):
+    try:
+        return json.loads(sh("pactl", "--format=json", "list", kind))
+    except Exception:
+        return []
+
+
+def vol_pct(d):
+    vals = [c.get("value", 0) for c in (d.get("volume") or {}).values()]
+    return round(sum(vals) / len(vals) / 65536 * 100) if vals else 0
+
+
+def kind_of(d):
+    p = d.get("properties", {})
+    ff, n, port = p.get("device.form_factor", "").lower(), d["name"].lower(), (d.get("active_port") or "").lower()
+    if "hdmi" in n or "hdmi" in port or "displayport" in port:
+        return "monitor"
+    if ff in ("headphone", "headset", "hands-free", "handsfree") or "headphone" in port or "headset" in port or "bluez" in n:
+        return "headphones"
+    return "speaker"
+
+
+def port_label(d):
+    ap = d.get("active_port")
+    for p in d.get("ports", []):
+        if p.get("name") == ap:
+            return p.get("description", "")
+    return ""
+
+
+def snapshot():
+    sinks = [dict(name=s["name"], desc=s.get("description") or s["name"], vol=vol_pct(s), mute=bool(s.get("mute")),
+                  idx=s["index"], kind=kind_of(s), port=port_label(s)) for s in pj("sinks")]
+    srcs = [dict(name=s["name"], desc=s.get("description") or s["name"], vol=vol_pct(s), mute=bool(s.get("mute")))
+            for s in pj("sources") if not s["name"].endswith(".monitor")]
+    apps = []
+    for a in pj("sink-inputs"):
+        p = a.get("properties", {})
+        name = p.get("application.name") or p.get("media.name") or "Unknown"
+        if internal_stream(a):
+            continue
+        icons = [p.get("application.icon_name"), (p.get("application.process.binary") or "").lower(), name.lower()]
+        apps.append(dict(idx=a["index"], name=name, media=p.get("media.name", ""), icons=[i for i in icons if i],
+                         vol=vol_pct(a), mute=bool(a.get("mute")), sink=a.get("sink")))
+    return dict(sinks=sinks, srcs=srcs, apps=apps, coop=coop_state(),
+                default_sink=sh("pactl", "get-default-sink").strip(),
+                default_src=sh("pactl", "get-default-source").strip())
+
+
+class Watcher(threading.Thread):
+    """Wakes the UI whenever PulseAudio / PipeWire reports a change."""
+    def __init__(self, cb):
+        super().__init__(daemon=True); self.cb = cb; self.proc = None; self.stop = False
+
+    def run(self):
+        while not self.stop:
+            try:
+                self.proc = subprocess.Popen(["pactl", "subscribe"], stdout=subprocess.PIPE, text=True)
+                for line in self.proc.stdout:
+                    if any(k in line for k in ("sink", "source", "server")) and "source-output" not in line:
+                        GLib.idle_add(self.cb)
+            except Exception:
+                pass
+            time.sleep(1)
+
+    def close(self):
+        self.stop = True
+        try:
+            self.proc.terminate()
+        except Exception:
+            pass
+
+
+class Meter(threading.Thread):
+    """Real output level: records the default sink's monitor and measures RMS."""
+    def __init__(self):
+        super().__init__(daemon=True); self.level = 0.0; self.proc = None; self.stop = False
+
+    def run(self):
+        while not self.stop:
+            try:
+                mon = sh("pactl", "get-default-sink").strip() + ".monitor"   # explicit name: works on pulse and pipewire
+                self.proc = subprocess.Popen(
+                    ["parec", "-d", mon, "--format=s16le", "--rate=8000", "--channels=1",
+                     "--latency-msec=30"], stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
+                while not self.stop:
+                    data = self.proc.stdout.read(480)
+                    if not data:
+                        break
+                    arr = array.array("h"); arr.frombytes(data[:len(data) // 2 * 2])
+                    if arr:
+                        rms = math.sqrt(sum(x * x for x in arr) / len(arr)) / 32768.0
+                        self.level = min(1.0, (rms ** 0.6) * 2.2)
+            except FileNotFoundError:
+                return
+            except Exception:
+                pass
+            self.level = 0.0
+            time.sleep(0.6)
+
+    def restart(self):
+        try:
+            self.proc.terminate()
+        except Exception:
+            pass
+
+    def close(self):
+        self.stop = True; self.restart()
+
+
+def play_chime():
+    """A little wind-chime arpeggio, synthesised on the fly (no audio files)."""
+    rate, n = 44100, int(44100 * 1.7)
+    buf = [0.0] * n
+    for k, f in enumerate((659.25, 783.99, 987.77, 1318.51)):
+        off = int(rate * 0.12 * k)
+        for i in range(n - off):
+            t = i / rate
+            env = min(1.0, t * 90) * math.exp(-t * 3.6)
+            buf[off + i] += env * (math.sin(2 * math.pi * f * t) + 0.25 * math.sin(4 * math.pi * f * t)) * 0.16
+    pcm = array.array("h", [int(max(-1, min(1, v)) * 32000) for v in buf]).tobytes()
+    try:
+        subprocess.run(["paplay", "--raw", "--rate=44100", "--channels=1", "--format=s16le"], input=pcm, timeout=6)
+    except Exception:
+        pass
+
+
+# ───────────────────────────── widgets ─────────────────────────────
+class Dial(Gtk.DrawingArea):
+    """The centrepiece: seven elemental arcs that light up with the volume."""
+    H, CY, R, LW = 256, 122, 96, 15
+
+    def __init__(self, on_vol, on_mute):
+        super().__init__()
+        self.set_size_request(-1, self.H)
+        self.add_events(Gdk.EventMask.BUTTON_PRESS_MASK | Gdk.EventMask.BUTTON_RELEASE_MASK |
+                        Gdk.EventMask.BUTTON1_MOTION_MASK | Gdk.EventMask.SCROLL_MASK | Gdk.EventMask.SMOOTH_SCROLL_MASK)
+        self.on_vol, self.on_mute = on_vol, on_mute
+        self.vol = self.shown = 0.0; self.muted = False; self.level = self.lvl_s = 0.0
+        self.name, self.kind = "", "speaker"; self.t = 0.0
+        self.drag = False; self.press_center = False; self.moved = False
+
+    def set_state(self, vol, muted):
+        self.vol, self.muted = float(vol), muted
+
+    def tick(self, dt):
+        self.t += dt
+        if not self.drag:
+            self.shown += (self.vol - self.shown) * min(1.0, dt * 9)
+        self.lvl_s += (self.level - self.lvl_s) * min(1.0, dt * 14)
+        self.queue_draw()
+
+    # geometry / input
+    def _center(self):
+        return self.get_allocated_width() / 2, self.CY
+
+    def _to_vol(self, x, y):
+        cx, cy = self._center()
+        th = (math.atan2(y - cy, x - cx) - START) % (2 * math.pi)
+        if th <= SWEEP:
+            return th / SWEEP * 100
+        return 0.0 if th > SWEEP + (2 * math.pi - SWEEP) / 2 else 100.0
+
+    def do_button_press_event(self, e):
+        if e.button != 1:
+            return True
+        cx, cy = self._center()
+        self.press_center = math.hypot(e.x - cx, e.y - cy) < 52
+        self.moved = False
+        if not self.press_center:
+            self.drag = True; self._set(self._to_vol(e.x, e.y))
+        return True
+
+    def do_motion_notify_event(self, e):
+        if self.drag:
+            self.moved = True; self._set(self._to_vol(e.x, e.y))
+        return True
+
+    def do_button_release_event(self, e):
+        if self.press_center and not self.moved:
+            self.on_mute()
+        self.drag = False; self.press_center = False
+        return True
+
+    def do_scroll_event(self, e):
+        step = 10 if e.state & Gdk.ModifierType.SHIFT_MASK else 1 if e.state & Gdk.ModifierType.CONTROL_MASK else 3
+        if e.direction == Gdk.ScrollDirection.UP:
+            d = 1
+        elif e.direction == Gdk.ScrollDirection.DOWN:
+            d = -1
+        else:
+            ok, dx, dy = e.get_scroll_deltas(); d = -dy
+        self._set(self.vol + d * step)
+        return True
+
+    def _set(self, v):
+        v = max(0.0, min(100.0, v))
+        self.vol = v
+        if self.drag:
+            self.shown = v
+        self.on_vol(v)
+
+    # drawing
+    def do_draw(self, cr):
+        W = self.get_allocated_width(); cx, cy, R, LW = W / 2, self.CY, self.R, self.LW
+        v = max(0.0, min(1.0, self.shown / 100.0)); muted = self.muted
+        lvl = 0.0 if muted else self.lvl_s
+        lit = min(6, max(0, int(math.ceil(v * 7)) - 1))
+        el_col = EL[lit][1] if not muted else MUTE_C
+
+        g = cairo.RadialGradient(cx, cy, 20, cx, cy, R + 38)
+        g.add_color_stop_rgba(0, el_col[0], el_col[1], el_col[2], 0.0)
+        g.add_color_stop_rgba(0.62, el_col[0], el_col[1], el_col[2], 0.07 + 0.22 * lvl)
+        g.add_color_stop_rgba(1, el_col[0], el_col[1], el_col[2], 0.0)
+        cr.set_source(g); cr.arc(cx, cy, R + 38, 0, 2 * math.pi); cr.fill()
+
+        cr.set_line_cap(cairo.LINE_CAP_BUTT)
+        for i in range(7):
+            a0, a1 = START + i * SEG + GAP / 2, START + (i + 1) * SEG - GAP / 2
+            cr.set_line_width(LW); A(cr, NAVY3, 0.55); cr.new_path(); cr.arc(cx, cy, R, a0, a1); cr.stroke()
+            frac = max(0.0, min(1.0, v * 7 - i))
+            if frac <= 0:
+                continue
+            col = mix(EL[i][1], MUTE_C, 0.82) if muted else EL[i][1]
+            end = a0 + (a1 - a0) * frac
+            cr.set_line_width(LW + 11); A(cr, col, 0.09 + 0.17 * lvl); cr.new_path(); cr.arc(cx, cy, R, a0, end); cr.stroke()
+            cr.set_line_width(LW); A(cr, col); cr.new_path(); cr.arc(cx, cy, R, a0, end); cr.stroke()
+            cr.set_line_width(3); A(cr, (1, 1, 1), 0.30); cr.new_path(); cr.arc(cx, cy, R - 4, a0, end); cr.stroke()
+
+        # outer gold filigree
+        cr.set_line_width(1.2); A(cr, GOLD, 0.75); cr.new_path(); cr.arc(cx, cy, R + 17, START, START + SWEEP); cr.stroke()
+        for i in range(8):
+            a = START + i * SEG
+            diamond(cr, cx + (R + 17) * math.cos(a), cy + (R + 17) * math.sin(a), 3.6); A(cr, GOLD); cr.fill()
+        # inner compass ring, slowly turning
+        r_in = R - LW / 2 - 9
+        cr.set_line_width(1); A(cr, GOLD, 0.55); cr.new_path(); cr.arc(cx, cy, r_in, 0, 2 * math.pi); cr.stroke()
+        for i in range(72):
+            a = i * math.pi / 36 + self.t * 0.05; ln = 6 if i % 6 == 0 else 3
+            cr.move_to(cx + (r_in - 2) * math.cos(a), cy + (r_in - 2) * math.sin(a))
+            cr.line_to(cx + (r_in - 2 - ln) * math.cos(a), cy + (r_in - 2 - ln) * math.sin(a))
+            A(cr, GOLD, 0.45 if i % 6 == 0 else 0.22); cr.set_line_width(1); cr.stroke()
+        d = cairo.RadialGradient(cx, cy - 20, 5, cx, cy, r_in - 8)
+        d.add_color_stop_rgba(0, 0.23, 0.26, 0.35, 0.95); d.add_color_stop_rgba(1, 0.14, 0.16, 0.23, 0.95)
+        cr.set_source(d); cr.arc(cx, cy, r_in - 8, 0, 2 * math.pi); cr.fill()
+
+        # the spark that rides the ring
+        ang = START + SWEEP * v; px, py = cx + R * math.cos(ang), cy + R * math.sin(ang)
+        g2 = cairo.RadialGradient(px, py, 0, px, py, 24)
+        g2.add_color_stop_rgba(0, 1, 1, 1, 0.55 + 0.3 * lvl); g2.add_color_stop_rgba(1, el_col[0], el_col[1], el_col[2], 0)
+        cr.set_source(g2); cr.arc(px, py, 24, 0, 2 * math.pi); cr.fill()
+        star(cr, px, py, 13 + 4 * lvl, 0.2, self.t * 0.7); A(cr, (1, 1, 1)); cr.fill_preserve()
+        A(cr, GOLD, 0.9); cr.set_line_width(1); cr.stroke()
+
+        # centre read-out
+        icon(cr, "speaker", cx, cy - 46, 25, GOLD_HI, 0.95, muted)
+        num = "Mute" if muted else str(int(round(self.shown)))
+        size = 40 if muted else 56
+        w = measure(cr, num, size, True)
+        off = 0 if muted else 10
+        text(cr, num, cx - off / 2, cy - 2, size, IVORY if not muted else MUTE_C, bold=True, anchor="c")
+        if not muted:
+            text(cr, "%", cx - off / 2 + w / 2 + 3, cy + 10, 19, GOLD)
+        label = self._resonance(v, muted)
+        text(cr, label, cx, cy + 40, 13, GOLD_HI, anchor="c")
+        text(cr, EL[lit][0] if not muted else "Silenced", cx, cy + 59, 12, el_col, anchor="c")
+
+        # device ribbon in the open gap of the ring
+        py2 = cy + R + 12
+        wmax = min(W - 40, 300)
+        rrect(cr, cx - wmax / 2, py2 - 14, wmax, 28, 14); A(cr, NAVY2, 0.95); cr.fill_preserve()
+        A(cr, GOLD, 0.6); cr.set_line_width(1); cr.stroke()
+        icon(cr, self.kind, cx - wmax / 2 + 20, py2, 15, GOLD)
+        text(cr, self.name or "No output", cx - wmax / 2 + 36, py2, 12, IVORY, width=wmax - 70)
+        diamond(cr, cx + wmax / 2 - 14, py2, 3.2); A(cr, GOLD); cr.fill()
+        return False
+
+    @staticmethod
+    def _resonance(v, muted):
+        if muted or v <= 0:
+            return "The wind is still"
+        for lim, s in ((0.25, "Whisper of the Breeze"), (0.5, "Mondstadt Morning"), (0.75, "Liyue Harbour Bustle"),
+                       (0.99, "Inazuma Thunder")):
+            if v <= lim:
+                return s
+        return "Peak of Celestia"
+
+
+class Slider(Gtk.DrawingArea):
+    def __init__(self, on_change, h=26):
+        super().__init__()
+        self.set_size_request(-1, h); self.set_hexpand(True)
+        self.add_events(Gdk.EventMask.BUTTON_PRESS_MASK | Gdk.EventMask.BUTTON_RELEASE_MASK |
+                        Gdk.EventMask.BUTTON1_MOTION_MASK | Gdk.EventMask.SCROLL_MASK | Gdk.EventMask.SMOOTH_SCROLL_MASK |
+                        Gdk.EventMask.ENTER_NOTIFY_MASK | Gdk.EventMask.LEAVE_NOTIFY_MASK)
+        self.on_change, self.value, self.muted, self.hover, self.drag = on_change, 0.0, False, False, False
+
+    def set(self, v, muted=None):
+        self.value = float(v)
+        if muted is not None:
+            self.muted = muted
+        self.queue_draw()
+
+    def _x(self, x):
+        w = self.get_allocated_width()
+        return max(0.0, min(100.0, (x - 10) / max(1, w - 10 - 46) * 100))
+
+    def _emit(self, v):
+        self.value = v; self.on_change(v); self.queue_draw()
+
+    def do_button_press_event(self, e):
+        self.drag = True; self._emit(self._x(e.x)); return True
+
+    def do_motion_notify_event(self, e):
+        if self.drag:
+            self._emit(self._x(e.x))
+        return True
+
+    def do_button_release_event(self, e):
+        self.drag = False; return True
+
+    def do_enter_notify_event(self, e):
+        self.hover = True; self.queue_draw()
+
+    def do_leave_notify_event(self, e):
+        self.hover = False; self.queue_draw()
+
+    def do_scroll_event(self, e):
+        # Never steal the wheel: it belongs to the surrounding list.
+        # Hold Ctrl over a slider for fine wheel adjustment.
+        if not (e.state & Gdk.ModifierType.CONTROL_MASK):
+            return False
+        if e.direction == Gdk.ScrollDirection.UP:
+            d = 1
+        elif e.direction == Gdk.ScrollDirection.DOWN:
+            d = -1
+        else:
+            d = -e.get_scroll_deltas()[2]
+        self._emit(max(0.0, min(100.0, self.value + d * 2))); return True
+
+    def do_draw(self, cr):
+        w, h = self.get_allocated_width(), self.get_allocated_height()
+        x0, x1, y = 10, w - 46, h / 2
+        xv = x0 + (x1 - x0) * self.value / 100
+        cr.set_line_cap(cairo.LINE_CAP_ROUND)
+        cr.set_line_width(4); A(cr, NAVY3, 0.8); cr.move_to(x0, y); cr.line_to(x1, y); cr.stroke()
+        for q in (0, 25, 50, 75, 100):
+            diamond(cr, x0 + (x1 - x0) * q / 100, y, 2.1); A(cr, GOLD, 0.3); cr.fill()
+        if self.value > 0:
+            g = cairo.LinearGradient(x0, 0, x1, 0)
+            c0, c1 = (MUTE_C, MUTE_C) if self.muted else (GOLD_LO, GOLD_HI)
+            g.add_color_stop_rgb(0, *c0); g.add_color_stop_rgb(1, *c1)
+            cr.set_source(g); cr.set_line_width(4); cr.move_to(x0, y); cr.line_to(xv, y); cr.stroke()
+        r = 8.5 if (self.hover or self.drag) else 7
+        diamond(cr, xv, y, r + 1.6); A(cr, GOLD, 0.35 if not self.muted else 0.1); cr.fill()
+        diamond(cr, xv, y, r); A(cr, IVORY if not self.muted else MUTE_C); cr.fill_preserve()
+        A(cr, GOLD_LO); cr.set_line_width(1.4); cr.stroke()
+        diamond(cr, xv, y, 2.4); A(cr, INK); cr.fill()
+        text(cr, str(int(round(self.value))), w - 2, y, 12, GOLD_HI if not self.muted else MUTE_C, bold=True, anchor="r")
+        return False
+
+
+class IconBtn(Gtk.DrawingArea):
+    def __init__(self, kind, on_click, size=32, flip_muted=True):
+        super().__init__()
+        self.kind, self.on_click, self.muted, self.hover, self.s = kind, on_click, False, False, size
+        self.set_size_request(size, size); self.set_valign(Gtk.Align.CENTER)
+        self.add_events(Gdk.EventMask.BUTTON_PRESS_MASK | Gdk.EventMask.ENTER_NOTIFY_MASK | Gdk.EventMask.LEAVE_NOTIFY_MASK)
+
+    def do_button_press_event(self, e):
+        if e.button == 1:
+            self.on_click()
+        return True
+
+    def do_enter_notify_event(self, e):
+        self.hover = True; self.queue_draw()
+
+    def do_leave_notify_event(self, e):
+        self.hover = False; self.queue_draw()
+
+    def do_draw(self, cr):
+        c = self.s / 2
+        if self.hover:
+            cr.arc(c, c, c - 1, 0, 2 * math.pi); A(cr, GOLD, 0.2); cr.fill()
+        icon(cr, self.kind, c, c, self.s * 0.58, GOLD_HI if not self.muted else MUTE_C, 1.0, self.muted)
+        return False
+
+
+class Ornament(Gtk.DrawingArea):
+    """Section heading: diamond, title, and a gold line that fades out."""
+    def __init__(self, title, right=""):
+        super().__init__()
+        self.title, self.right = title, right
+        self.set_size_request(-1, 26)
+
+    def set_right(self, s):
+        self.right = s; self.queue_draw()
+
+    def do_draw(self, cr):
+        w, h = self.get_allocated_width(), self.get_allocated_height(); y = h / 2
+        diamond(cr, 6, y, 4); A(cr, GOLD); cr.fill()
+        tw = text(cr, self.title, 18, y, 13, GOLD_HI, bold=True)
+        rw = text(cr, self.right, w, y, 11, IVORY, 0.55, anchor="r", width=w * 0.5) if self.right else 0
+        x0, x1 = 18 + tw + 10, w - (rw + 10 if rw else 0)
+        if x1 > x0:
+            g = cairo.LinearGradient(x0, 0, x1, 0)
+            g.add_color_stop_rgba(0, *GOLD, 0.7); g.add_color_stop_rgba(1, *GOLD, 0.0)
+            cr.set_source(g); cr.set_line_width(1); cr.move_to(x0, y); cr.line_to(x1, y); cr.stroke()
+        return False
+
+
+class Medal(Gtk.DrawingArea):
+    """Round application medal (like the notification medals): app icon or initial."""
+    def __init__(self, size=36):
+        super().__init__()
+        self.s, self.pix, self.letter = size, None, "?"
+        self.set_size_request(size, size); self.set_valign(Gtk.Align.CENTER)
+
+    def set_app(self, name, icons):
+        self.letter = (name[:1] or "?").upper(); self.pix = None
+        theme = Gtk.IconTheme.get_default()
+        for n in icons:
+            try:
+                if theme.has_icon(n):
+                    self.pix = theme.load_icon(n, int(self.s * 0.62), 0); break
+            except Exception:
+                pass
+        self.queue_draw()
+
+    def do_draw(self, cr):
+        c = self.s / 2
+        cr.arc(c, c, c - 2, 0, 2 * math.pi); A(cr, NAVY2); cr.fill_preserve(); A(cr, GOLD); cr.set_line_width(1.6); cr.stroke()
+        cr.arc(c, c, c - 5, 0, 2 * math.pi); A(cr, GOLD, 0.3); cr.set_line_width(1); cr.stroke()
+        if self.pix:
+            Gdk.cairo_set_source_pixbuf(cr, self.pix, c - self.pix.get_width() / 2, c - self.pix.get_height() / 2); cr.paint()
+        else:
+            text(cr, self.letter, c, c, 16, GOLD_HI, bold=True, anchor="c")
+        return False
+
+
+class DeviceRow(Gtk.DrawingArea):
+    """One slim line per output: click = use this output. The small box at the right = Co-op member."""
+    H = 32
+
+    def __init__(self, d, popup):
+        super().__init__()
+        self.d, self.popup = d, popup
+        self.selected = self.hover = self.hover_box = False
+        self.member = True; self.show_box = True; self.busy = False
+        self.set_size_request(-1, self.H)
+        self.add_events(Gdk.EventMask.BUTTON_PRESS_MASK | Gdk.EventMask.POINTER_MOTION_MASK |
+                        Gdk.EventMask.ENTER_NOTIFY_MASK | Gdk.EventMask.LEAVE_NOTIFY_MASK)
+
+    def _in_box(self, x):
+        return self.show_box and x > self.get_allocated_width() - 34
+
+    def do_button_press_event(self, e):
+        if e.button != 1:
+            return True
+        if self._in_box(e.x):
+            if not self.busy:
+                self.popup.on_coop("pick", self.d["name"])
+        else:
+            self.popup.on_pick_sink(self.d)
+        return True
+
+    def do_motion_notify_event(self, e):
+        hb = self._in_box(e.x)
+        if hb != self.hover_box:
+            self.hover_box = hb; self.queue_draw()
+        return True
+
+    def do_enter_notify_event(self, e):
+        self.hover = True; self.queue_draw()
+
+    def do_leave_notify_event(self, e):
+        self.hover = self.hover_box = False; self.queue_draw()
+
+    def update(self, d, st):
+        co = st["coop"]
+        self.d = d
+        self.selected = d["name"] == st["default_sink"] or (co["active"] and d["name"] in co["members"])
+        virtual = d["name"].startswith(("irminsul", "effect_input."))
+        self.show_box = not virtual
+        self.member = co["selected"] is None or d["name"] in co["selected"]
+        self.busy = self.popup.coop_busy
+        self.set_tooltip_text("Click: use this output   |   Box: include in Co-op")
+        self.queue_draw()
+
+    def do_draw(self, cr):
+        w, h, d, sel = self.get_allocated_width(), self.get_allocated_height(), self.d, self.selected
+        rrect(cr, 1, 1, w - 2, h - 2, 9)
+        if sel:
+            g = cairo.LinearGradient(0, 0, w, 0); g.add_color_stop_rgb(0, *IVORY); g.add_color_stop_rgb(1, *mix(IVORY, GOLD, 0.45))
+            cr.set_source(g)
+        else:
+            A(cr, NAVY3 if self.hover else NAVY2, 0.95)
+        cr.fill_preserve(); A(cr, GOLD, 0.9 if sel else 0.25); cr.set_line_width(1.1); cr.stroke()
+        fg = INK if sel else IVORY
+        icon(cr, d["kind"], 18, h / 2, 15, INK if sel else GOLD, 1.0, d["mute"])
+        right = 34 if self.show_box else 12
+        name = d["desc"]
+        nw = text(cr, name, 36, h / 2, 12, fg, bold=True, width=w - 36 - right - 52)
+        sub = "Muted" if d["mute"] else f'{d["vol"]}%'
+        text(cr, sub, w - right - 4, h / 2, 11, fg, 0.6, anchor="r")
+        if self.show_box:
+            bx, by, bs = w - 25, h / 2 - 7, 14
+            rrect(cr, bx, by, bs, bs, 4)
+            if self.member:
+                A(cr, GOLD_LO if sel else GOLD, 1.0 if not self.busy else 0.5); cr.fill_preserve()
+                A(cr, INK if sel else NAVY); cr.set_line_width(1.0); cr.stroke()
+                cr.set_line_width(2); cr.set_line_cap(cairo.LINE_CAP_ROUND); cr.set_line_join(cairo.LINE_JOIN_ROUND)
+                A(cr, INK if sel else NAVY)
+                cr.move_to(bx + 3.2, by + 7.4); cr.line_to(bx + 6, by + 10.2); cr.line_to(bx + 10.8, by + 4); cr.stroke()
+            else:
+                A(cr, GOLD_LO if sel else GOLD, 0.9 if self.hover_box else 0.55)
+                cr.set_line_width(1.2); cr.stroke()
+        return False
+
+
+class Chips(Gtk.DrawingArea):
+    ITEMS = (("Serenitea", 20), ("Adventure", 50), ("Domain", 80), ("Burst", 100))
+
+    def __init__(self, on_pick):
+        super().__init__()
+        self.on_pick, self.vol, self.hover = on_pick, 0, -1
+        self.set_size_request(-1, 46)
+        self.add_events(Gdk.EventMask.BUTTON_PRESS_MASK | Gdk.EventMask.POINTER_MOTION_MASK | Gdk.EventMask.LEAVE_NOTIFY_MASK)
+
+    def _at(self, x):
+        w = self.get_allocated_width(); n = len(self.ITEMS)
+        return max(0, min(n - 1, int(x / (w / n))))
+
+    def do_button_press_event(self, e):
+        if e.button == 1:
+            self.on_pick(self.ITEMS[self._at(e.x)][1])
+        return True
+
+    def do_motion_notify_event(self, e):
+        i = self._at(e.x)
+        if i != self.hover:
+            self.hover = i; self.queue_draw()
+        return True
+
+    def do_leave_notify_event(self, e):
+        self.hover = -1; self.queue_draw()
+
+    def do_draw(self, cr):
+        w, h = self.get_allocated_width(), self.get_allocated_height(); n = len(self.ITEMS); gap = 8
+        cw = (w - gap * (n - 1)) / n
+        for i, (name, val) in enumerate(self.ITEMS):
+            x = i * (cw + gap); sel = abs(self.vol - val) <= 1
+            rrect(cr, x + 1, 1, cw - 2, h - 2, 10)
+            if sel:
+                A(cr, IVORY)
+            else:
+                A(cr, NAVY3 if i == self.hover else NAVY2, 0.95)
+            cr.fill_preserve(); A(cr, GOLD, 0.9 if sel else 0.3); cr.set_line_width(1.2); cr.stroke()
+            col = EL[min(6, int(val / 100 * 7 - 0.01))][1]
+            diamond(cr, x + cw / 2, 9, 3.2); A(cr, col); cr.fill()
+            text(cr, name, x + cw / 2, 22, 12, INK if sel else IVORY, bold=True, anchor="c")
+            text(cr, f"{val}%", x + cw / 2, 36, 11, INK if sel else GOLD, 0.8, anchor="c")
+        return False
+
+
+class Pill(Gtk.DrawingArea):
+    def __init__(self, label, cb):
+        super().__init__()
+        self.label, self.cb, self.hover = label, cb, False
+        self.set_size_request(-1, 34); self.set_hexpand(True)
+        self.add_events(Gdk.EventMask.BUTTON_PRESS_MASK | Gdk.EventMask.ENTER_NOTIFY_MASK | Gdk.EventMask.LEAVE_NOTIFY_MASK)
+
+    def do_button_press_event(self, e):
+        if e.button == 1:
+            self.cb()
+        return True
+
+    def do_enter_notify_event(self, e):
+        self.hover = True; self.queue_draw()
+
+    def do_leave_notify_event(self, e):
+        self.hover = False; self.queue_draw()
+
+    def do_draw(self, cr):
+        w, h = self.get_allocated_width(), self.get_allocated_height()
+        rrect(cr, 1, 1, w - 2, h - 2, 17)
+        A(cr, GOLD, 0.22 if self.hover else 0.0); cr.fill_preserve(); A(cr, GOLD, 0.85); cr.set_line_width(1.2); cr.stroke()
+        diamond(cr, 16, h / 2, 3); A(cr, GOLD); cr.fill(); diamond(cr, w - 16, h / 2, 3); cr.fill()
+        text(cr, self.label, w / 2, h / 2, 12, GOLD_HI, bold=True, anchor="c")
+        return False
+
+
+class TitleBar(Gtk.DrawingArea):
+    def __init__(self):
+        super().__init__()
+        self.set_size_request(-1, 46); self.set_hexpand(True); self.t = 0.0
+
+    def do_draw(self, cr):
+        h = self.get_allocated_height()
+        star(cr, 14, h / 2, 12, 0.2, self.t); A(cr, GOLD); cr.fill()
+        text(cr, "Resonance Mixer", 36, h / 2 - 7, 18, IVORY, bold=True)
+        text(cr, "Paimon's sound console", 36, h / 2 + 12, 11, GOLD, 0.8)
+        return False
+
+
+class AppRow(Gtk.Box):
+    def __init__(self, a, on_vol, on_mute):
+        super().__init__(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+        self.a = a
+        self.medal = Medal(28); self.medal.set_app(a["name"], a["icons"])
+        self.label = Gtk.Label(xalign=0); self.label.set_ellipsize(Pango.EllipsizeMode.END)
+        self.label.get_style_context().add_class("app-name")
+        self.slider = Slider(lambda v: on_vol(self.a, v), h=20)
+        self.mute = IconBtn("speaker", lambda: on_mute(self.a), 26)
+        col = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=0); col.set_hexpand(True)
+        col.pack_start(self.label, False, False, 0); col.pack_start(self.slider, False, False, 0)
+        self.pack_start(self.medal, False, False, 0); self.pack_start(col, True, True, 0); self.pack_start(self.mute, False, False, 0)
+        self.update(a)
+
+    def update(self, a, hold=False):
+        self.a = a
+        self.label.set_text(a["name"] + (f'  ·  {a["media"]}' if a["media"] and a["media"] != a["name"] else ""))
+        if not hold:
+            self.slider.set(a["vol"], a["mute"])
+        self.slider.muted = a["mute"]; self.mute.muted = a["mute"]; self.mute.queue_draw()
+
+
+CSS = b"""
+window.irm { background: transparent; }
+.app-name { color: #ECE5D8; font-family: "HYWenHei-85W","SDK_SC_Web","Noto Sans",sans-serif; font-size: 12px; }
+.empty { color: rgba(236,229,216,0.5); font-family: "HYWenHei-85W","SDK_SC_Web","Noto Sans",sans-serif; font-size: 12px; }
+scrolledwindow, viewport, scrolledwindow > viewport > box { background: transparent; background-color: transparent; border: none; box-shadow: none; }
+scrollbar { background: transparent; border: none; margin: 2px 0; }
+scrollbar.vertical { min-width: 6px; }
+scrollbar trough { background: rgba(163,139,90,0.10); border: none; border-radius: 3px; min-width: 3px; }
+scrollbar slider { background-color: rgba(211,188,142,0.55); border-radius: 3px; min-width: 3px; min-height: 28px; border: none; }
+scrollbar slider:hover { background-color: rgba(211,188,142,0.9); }
+"""
+
+
+# ───────────────────────────── the popup ─────────────────────────────
+class Popup(Gtk.Window):
+    def __init__(self, place):
+        super().__init__(type=Gtk.WindowType.TOPLEVEL)
+        self.use_ls = bool(LS) and LS.is_supported()
+        self.get_style_context().add_class("irm")
+        self.set_title("Resonance Mixer"); self.set_decorated(False); self.set_resizable(False)
+        self.set_app_paintable(True); self.set_default_size(WIDTH, 1)
+        scr = self.get_screen(); vis = scr.get_rgba_visual()
+        if vis is not None and scr.is_composited():
+            self.set_visual(vis)
+        self.st = None; self.cur_sink = None; self.hold = {}; self.pending = {}; self.flush_id = 0
+        self.refreshing = False; self.refresh_id = 0; self.dev_sig = None; self.app_sig = None
+        self.last_sink = None; self.opened = time.monotonic(); self.apps = {}; self.cards = []
+
+        self.catcher = None
+        if self.use_ls:
+            self._setup_layer(place)
+        else:
+            self.set_position(Gtk.WindowPosition.CENTER if CENTER else Gtk.WindowPosition.MOUSE)
+
+        # content: keep the dial and footer fixed; put every variable-height control
+        # in one viewport so device rows cannot be clipped by a nested scroller.
+        root = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6)
+        root.set_margin_start(32); root.set_margin_end(32); root.set_margin_top(22); root.set_margin_bottom(22)
+        head = Gtk.Box(spacing=0); self.title = TitleBar()
+        head.pack_start(self.title, True, True, 0); head.pack_start(IconBtn("close", self.close_all, 30), False, False, 0)
+        root.pack_start(head, False, False, 0)
+        self.dial = Dial(self.on_master_vol, self.on_master_mute); root.pack_start(self.dial, False, False, 0)
+        self.chips = Chips(self.on_master_vol_final); root.pack_start(self.chips, False, False, 2)
+
+        controls = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6)
+        controls.set_margin_end(10)
+        self.coop_busy = False
+        self.coop_btn = Pill("Enable Co-op", lambda: self.on_coop("toggle"))
+        controls.pack_start(self.coop_btn, False, False, 0)
+        self.coop_status = Gtk.Label(label="", xalign=0)
+        self.coop_status.get_style_context().add_class("empty")
+        self.coop_status.set_line_wrap(True); self.coop_status.set_max_width_chars(46)
+        self.coop_status.set_no_show_all(True)
+        controls.pack_start(self.coop_status, False, False, 0)
+        self.out_h = Ornament("Output Devices"); controls.pack_start(self.out_h, False, False, 0)
+        self.dev_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=4)
+        controls.pack_start(self.dev_box, False, False, 0)
+
+        self.app_h = Ornament("Party Mixer"); controls.pack_start(self.app_h, False, False, 0)
+        self.apps_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8)
+        self.empty = Gtk.Label(label="Nothing is making sound right now.", xalign=0)
+        self.empty.get_style_context().add_class("empty")
+        controls.pack_start(self.apps_box, False, False, 0)
+
+        self.mic_wrap = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=4); self.mic_wrap.set_no_show_all(True)
+        self.mic_h = Ornament("Microphone"); self.mic_wrap.pack_start(self.mic_h, False, False, 0)
+        mrow = Gtk.Box(spacing=8)
+        self.mic_btn = IconBtn("mic", self.on_mic_mute, 32); self.mic_sl = Slider(self.on_mic_vol)
+        mrow.pack_start(self.mic_btn, False, False, 0); mrow.pack_start(self.mic_sl, True, True, 0)
+        self.mic_wrap.pack_start(mrow, False, False, 0); controls.pack_start(self.mic_wrap, False, False, 0)
+
+        self.controls_scroll = Gtk.ScrolledWindow()
+        self.controls_scroll.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC)
+        self.controls_scroll.set_overlay_scrolling(False)
+        self.controls_scroll.set_propagate_natural_height(True)
+        try:
+            screen_h = self.get_screen().get_height()
+        except Exception:
+            screen_h = 900
+        body_h = max(120, min(300, screen_h - 600))
+        self.controls_scroll.set_min_content_height(60)
+        self.controls_scroll.set_max_content_height(body_h)
+        self.controls_scroll.add(controls)
+        root.pack_start(self.controls_scroll, True, True, 0)
+
+        foot = Gtk.Box(spacing=10, homogeneous=True); foot.set_margin_top(2)
+        foot.pack_start(Pill("Test chime", lambda: POOL.submit(play_chime)), True, True, 0)
+        foot.pack_start(Pill("Sound settings", self.open_settings), True, True, 0)
+        root.pack_start(foot, False, False, 0)
+        self.add(root)
+
+        self.connect("draw", self.draw_panel)
+        self.connect("key-press-event", self.on_key)
+        self.connect("destroy", lambda *_: self.shutdown())
+        if not self.use_ls:
+            self.connect("focus-out-event", lambda *_: self.close_all() if time.monotonic() - self.opened > 0.6 else None)
+
+        self.meter = Meter(); self.meter.start()
+        self.watcher = Watcher(self.on_event); self.watcher.start()
+        self.refresh(); self.set_opacity(0.0)
+        self.last_t = time.monotonic(); GLib.timeout_add(33, self.tick)
+
+    # layer-shell: popup under the clicked icon + a transparent click-catcher behind it
+    def _setup_layer(self, place):
+        LS.init_for_window(self); LS.set_namespace(self, "irminsul-volume"); LS.set_layer(self, LS.Layer.OVERLAY)
+        LS.set_keyboard_mode(self, LS.KeyboardMode.EXCLUSIVE)
+        anchor_bottom, left, gap = place
+        if not CENTER:
+            LS.set_anchor(self, LS.Edge.LEFT, True)
+            LS.set_anchor(self, LS.Edge.BOTTOM if anchor_bottom else LS.Edge.TOP, True)
+            LS.set_margin(self, LS.Edge.LEFT, int(left))
+            LS.set_margin(self, LS.Edge.BOTTOM if anchor_bottom else LS.Edge.TOP, int(gap))
+        # CENTER: no anchors at all -> the compositor centres the surface on the focused output
+        c = Gtk.Window(type=Gtk.WindowType.TOPLEVEL); c.set_app_paintable(True)
+        scr = c.get_screen()
+        if scr.get_rgba_visual() is not None:
+            c.set_visual(scr.get_rgba_visual())
+        c.get_style_context().add_class("irm")
+        LS.init_for_window(c); LS.set_namespace(c, "irminsul-volume-catcher"); LS.set_layer(c, LS.Layer.TOP)
+        for e in (LS.Edge.TOP, LS.Edge.BOTTOM, LS.Edge.LEFT, LS.Edge.RIGHT):
+            LS.set_anchor(c, e, True)
+        LS.set_exclusive_zone(c, -1); LS.set_keyboard_mode(c, LS.KeyboardMode.NONE)
+        c.add_events(Gdk.EventMask.BUTTON_PRESS_MASK)
+        c.connect("draw", lambda w, cr: (cr.set_operator(cairo.OPERATOR_SOURCE), cr.set_source_rgba(0, 0, 0, 0.004), cr.paint(), True)[-1])
+        c.connect("button-press-event", lambda *_: self.close_all())
+        c.show_all(); self.catcher = c
+
+    def draw_panel(self, w, cr):
+        W, H = w.get_allocated_width(), w.get_allocated_height()
+        cr.set_operator(cairo.OPERATOR_CLEAR); cr.paint(); cr.set_operator(cairo.OPERATOR_OVER)
+        x, y, pw, ph = 10, 8, W - 20, H - 18
+        for i in range(7):                                   # soft shadow
+            rrect(cr, x - i, y - i + 4, pw + 2 * i, ph + 2 * i, 18 + i); A(cr, (0, 0, 0), 0.05); cr.fill()
+        rrect(cr, x, y, pw, ph, 18)
+        g = cairo.LinearGradient(0, y, 0, y + ph); g.add_color_stop_rgb(0, 0.215, 0.24, 0.32); g.add_color_stop_rgb(1, 0.15, 0.17, 0.24)
+        cr.set_source(g); cr.fill_preserve(); A(cr, GOLD, 0.95); cr.set_line_width(1.8); cr.stroke()
+        rng = random.Random(7)                               # faint star-dust, stable per size
+        for _ in range(26):
+            sx, sy = x + 18 + rng.random() * (pw - 36), y + 18 + rng.random() * (ph - 36)
+            star(cr, sx, sy, 2 + rng.random() * 3.2, 0.25); A(cr, GOLD, 0.05 + rng.random() * 0.08); cr.fill()
+        rrect(cr, x + 7, y + 7, pw - 14, ph - 14, 12); A(cr, GOLD, 0.30); cr.set_line_width(1); cr.stroke()
+        for cx_, cy_ in ((x + 7, y + 7), (x + pw - 7, y + 7), (x + 7, y + ph - 7), (x + pw - 7, y + ph - 7)):
+            diamond(cr, cx_, cy_, 4.2); A(cr, NAVY); cr.fill_preserve(); A(cr, GOLD); cr.set_line_width(1.2); cr.stroke()
+        mx = x + pw / 2                                       # top-centre notch
+        for dx in (-16, 16):
+            diamond(cr, mx + dx, y, 2.4); A(cr, GOLD); cr.fill()
+        diamond(cr, mx, y, 6); A(cr, NAVY); cr.fill_preserve(); A(cr, GOLD); cr.set_line_width(1.4); cr.stroke()
+        return False
+
+    # ── lifecycle ──
+    def tick(self):
+        now = time.monotonic(); dt = now - self.last_t; self.last_t = now
+        self.dial.level = self.meter.level; self.dial.tick(dt)
+        self.title.t += dt * 0.6; self.title.queue_draw()
+        age = now - self.opened
+        if age < 0.2:
+            self.set_opacity(min(1.0, age / 0.2))
+        elif self.get_opacity() < 1.0:
+            self.set_opacity(1.0)
+        return True
+
+    def on_key(self, w, e):
+        k = Gdk.keyval_name(e.keyval)
+        if k == "Escape":
+            self.close_all()
+        elif k in ("Up", "Right"):
+            self.on_master_vol(min(100, self.dial.vol + 5)); self.dial.vol = min(100, self.dial.vol + 5)
+        elif k in ("Down", "Left"):
+            self.on_master_vol(max(0, self.dial.vol - 5)); self.dial.vol = max(0, self.dial.vol - 5)
+        elif k in ("m", "M", "space"):
+            self.on_master_mute()
+        return True
+
+    def close_all(self):
+        if self.catcher:
+            self.catcher.destroy()
+        self.destroy()
+
+    def shutdown(self):
+        if self.flush_id:
+            GLib.source_remove(self.flush_id); self.flush_id = 0
+            self._flush()
+        for t in (self.meter, self.watcher):
+            t.close()
+        try:
+            os.remove(PIDF)
+        except Exception:
+            pass
+        Gtk.main_quit()
+
+    def open_settings(self):
+        # We re-exec'd with LD_PRELOAD=libgtk-layer-shell (a GTK3 lib). Children must not inherit it,
+        # or GTK4 apps (pavucontrol 6, pwvucontrol...) abort with "GTK 2/3 symbols detected".
+        env = dict(os.environ)
+        env.pop("IRMINSUL_NO_REEXEC", None)
+        pre = [x for x in env.get("LD_PRELOAD", "").split(":") if x and "gtk-layer-shell" not in x]
+        if pre:
+            env["LD_PRELOAD"] = ":".join(pre)
+        else:
+            env.pop("LD_PRELOAD", None)
+        for cmd in (["irminsul-settings"], ["pavucontrol"], ["pwvucontrol"], ["gnome-control-center", "sound"]):
+            try:
+                subprocess.Popen(cmd, start_new_session=True, env=env); break
+            except Exception:
+                continue
+        self.close_all()
+
+    # ── commands (throttled while dragging) ──
+    def held(self, key):
+        return time.monotonic() < self.hold.get(key, 0)
+
+    def touch(self, key, secs=0.7):
+        self.hold[key] = time.monotonic() + secs
+
+    def queue(self, key, cmd):
+        self.pending[key] = cmd
+        if not self.flush_id:
+            self.flush_id = GLib.timeout_add(45, self._flush)
+
+    def _flush(self):
+        for cmd in self.pending.values():
+            COMMANDS.submit(run, cmd)
+        self.pending.clear(); self.flush_id = 0
+        return False
+
+    def sink_name(self):
+        return self.cur_sink["name"] if self.cur_sink else "@DEFAULT_SINK@"
+
+    def on_master_vol(self, v):
+        self.touch("master"); self.queue("master", ["pactl", "set-sink-volume", self.sink_name(), f"{int(round(v))}%"])
+        if self.dial.muted and v > 0:
+            self.dial.muted = False; COMMANDS.submit(run, ["pactl", "set-sink-mute", self.sink_name(), "0"])
+        self.chips.vol = v; self.chips.queue_draw()
+
+    def on_master_vol_final(self, v):
+        self.dial.vol = float(v); self.on_master_vol(v)
+
+    def on_master_mute(self):
+        self.touch("master"); self.dial.muted = not self.dial.muted
+        COMMANDS.submit(run, ["pactl", "set-sink-mute", self.sink_name(), "toggle"])
+
+    def on_device_vol(self, d, v):
+        key = "device:" + d["name"]
+        self.touch(key)
+        self.queue(key, ["pactl", "set-sink-volume", d["name"], f"{int(round(v))}%"])
+
+    def on_device_mute(self, d):
+        COMMANDS.submit(run, ["pactl", "set-sink-mute", d["name"], "toggle"])
+
+    def say(self, msg):
+        msg = msg or ""
+        self.coop_status.set_text(msg)
+        (self.coop_status.show if msg else self.coop_status.hide)()
+        if getattr(self, "say_id", 0):
+            GLib.source_remove(self.say_id); self.say_id = 0
+        if msg:
+            self.say_id = GLib.timeout_add_seconds(6, lambda: (self.say(""), False)[1])
+
+    def on_coop(self, action, name=None):
+        if self.coop_busy:
+            return
+        self.coop_busy = True
+        self.coop_btn.label = "Working..."; self.coop_btn.queue_draw()
+        self.say("Updating Co-op output...")
+        for row in self.cards:
+            row.busy = True; row.queue_draw()
+        def job():
+            message = coop_command(action, name)
+            GLib.idle_add(done, message)
+        def done(message):
+            self.coop_busy = False
+            self.say(message); self.refresh()
+            GLib.timeout_add(700, lambda: (self.refresh(), False)[1])   # settle after the server finishes unloading
+            return False
+        COMMANDS.submit(job)
+
+    def on_pick_sink(self, d):
+        co = (self.st or {}).get("coop", {})
+        if co.get("active") and d["name"] not in co.get("names", [co.get("name")]):
+            self.say("Co-op is active: tick/untick devices, or disable Co-op to use one output")
+            return
+        apps = list((self.st or {}).get("apps", []))
+        def job():
+            if not run(["pactl", "set-default-sink", d["name"]]):
+                GLib.idle_add(self.say, "Could not change output")
+                return
+            for a in apps:
+                run(["pactl", "move-sink-input", str(a["idx"]), d["name"]])
+        COMMANDS.submit(job)
+
+    def on_app_vol(self, a, v):
+        key = f'app{a["idx"]}'; self.touch(key)
+        self.queue(key, ["pactl", "set-sink-input-volume", str(a["idx"]), f"{int(round(v))}%"])
+
+    def on_app_mute(self, a):
+        COMMANDS.submit(run, ["pactl", "set-sink-input-mute", str(a["idx"]), "toggle"])
+
+    def on_mic_vol(self, v):
+        self.touch("mic"); src = (self.st or {}).get("default_src", "@DEFAULT_SOURCE@")
+        self.queue("mic", ["pactl", "set-source-volume", src, f"{int(round(v))}%"])
+
+    def on_mic_mute(self):
+        src = (self.st or {}).get("default_src", "@DEFAULT_SOURCE@")
+        self.mic_btn.muted = not self.mic_btn.muted; self.mic_sl.muted = self.mic_btn.muted; self.mic_btn.queue_draw()
+        COMMANDS.submit(run, ["pactl", "set-source-mute", src, "toggle"])
+
+    # ── state sync ──
+    def on_event(self):
+        if not self.refresh_id:
+            self.refresh_id = GLib.timeout_add(90, self._do_refresh)
+
+    def _do_refresh(self):
+        self.refresh_id = 0; self.refresh(); return False
+
+    def refresh(self):
+        if self.refreshing:
+            self.refresh_again = True   # running snapshot may predate the change: go again when it lands
+            return
+        self.refreshing = True; self.refresh_again = False
+        POOL.submit(lambda: GLib.idle_add(self.apply, snapshot()))
+
+    def apply(self, st):
+        self.refreshing = False; self.st = st
+        if getattr(self, "refresh_again", False):
+            self.refresh_again = False; GLib.timeout_add(60, lambda: (self.refresh(), False)[1])
+        sinks = st["sinks"]
+        cur = next((s for s in sinks if s["name"] == st["default_sink"]), sinks[0] if sinks else None)
+        if cur:
+            self.cur_sink = cur
+            if not self.held("master") and not self.dial.drag:
+                self.dial.set_state(cur["vol"], cur["mute"]); self.chips.vol = cur["vol"]; self.chips.queue_draw()
+            self.dial.name, self.dial.kind = cur["desc"], cur["kind"]
+            if cur["name"] != self.last_sink:
+                self.last_sink = cur["name"]; self.meter.restart()
+        else:
+            self.cur_sink = None
+            self.dial.name = "No output"; self.dial.set_state(0, False)
+        # devices
+        sinks = [s for s in sinks if not s["name"].startswith("irminsul_coop")]
+        sig = tuple(s["name"] for s in sinks)
+        if sig != self.dev_sig:
+            self.dev_sig = sig
+            for c in self.dev_box.get_children():
+                self.dev_box.remove(c)
+            self.cards = []
+            for s in sinks:
+                card = DeviceRow(s, self); self.dev_box.pack_start(card, False, False, 0); self.cards.append(card)
+            self.dev_box.show_all(); self.resize(WIDTH, 1)
+        for card, s in zip(self.cards, sinks):
+            card.update(s, st)
+        co = st["coop"]
+        if not self.coop_busy:
+            self.coop_btn.label = "Disable Co-op" if co["active"] else "Enable Co-op"
+            self.coop_btn.queue_draw()
+        self.out_h.set_right(f"{len(co['members'])} in Co-op" if co["active"] else f"{len(sinks)} found")
+        # apps
+        asig = tuple((a["idx"], a["name"]) for a in st["apps"])
+        if asig != self.app_sig:
+            self.app_sig = asig
+            for c in self.apps_box.get_children():
+                self.apps_box.remove(c)
+            self.apps = {}
+            if not st["apps"]:
+                self.apps_box.pack_start(self.empty, False, False, 4)
+            for a in st["apps"]:
+                row = AppRow(a, self.on_app_vol, self.on_app_mute); self.apps[a["idx"]] = row
+                self.apps_box.pack_start(row, False, False, 0)
+            self.apps_box.show_all(); self.resize(WIDTH, 1)
+        for a in st["apps"]:
+            if a["idx"] in self.apps:
+                self.apps[a["idx"]].update(a, self.held(f'app{a["idx"]}'))
+        n = len(st["apps"]); self.app_h.set_right(f"{n} playing" if n else "")
+        # mic
+        src = next((s for s in st["srcs"] if s["name"] == st["default_src"]), st["srcs"][0] if st["srcs"] else None)
+        if src:
+            if not self.mic_wrap.get_visible():
+                self.mic_wrap.set_no_show_all(False); self.mic_wrap.show_all(); self.resize(WIDTH, 1)
+            self.mic_h.set_right(src["desc"])
+            self.mic_btn.muted = src["mute"]; self.mic_btn.queue_draw()
+            if not self.held("mic"):
+                self.mic_sl.set(src["vol"], src["mute"])
+        elif self.mic_wrap.get_visible():
+            self.mic_wrap.hide(); self.resize(WIDTH, 1)
+        return False
+
+
+# ───────────────────────────── placement under the clicked icon ─────────────────────────────
+def hypr(*args):
+    try:
+        return json.loads(sh("hyprctl", *args, "-j", timeout=1.5))
+    except Exception:
+        return None
+
+
+def placement():
+    """(anchor_bottom, left_margin, edge_gap). Falls back to top-right under a typical bar."""
+    try:
+        cur, mons = hypr("cursorpos"), hypr("monitors")
+        if cur and mons:
+            cx, cy = float(cur["x"]), float(cur["y"])
+            mon = next((m for m in mons if m["x"] <= cx < m["x"] + m["width"] / m.get("scale", 1)
+                        and m["y"] <= cy < m["y"] + m["height"] / m.get("scale", 1)), None) or mons[0]
+            mw, mh = mon["width"] / mon.get("scale", 1), mon["height"] / mon.get("scale", 1)
+            rx, ry = cx - mon["x"], cy - mon["y"]
+            left = max(2, min(mw - WIDTH - 2, rx - WIDTH / 2 - 10))
+            if ry < mh / 2:
+                return False, left, ry + 18
+            return True, left, (mh - ry) + 18
+    except Exception:
+        pass
+    mw = 1920
+    try:
+        mw = Gdk.Display.get_default().get_monitor(0).get_geometry().width
+    except Exception:
+        pass
+    return False, max(2, mw - WIDTH - 6), 46
+
+
+def main():
+    with open(PIDF, "w") as f:
+        f.write(str(os.getpid()))
+    prov = Gtk.CssProvider(); prov.load_from_data(CSS)
+    Gtk.StyleContext.add_provider_for_screen(Gdk.Screen.get_default(), prov, Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION)
+    win = Popup(placement())
+    GLib.unix_signal_add(GLib.PRIORITY_DEFAULT, signal.SIGTERM, lambda *_: (win.close_all(), False)[1])
+    GLib.unix_signal_add(GLib.PRIORITY_DEFAULT, signal.SIGINT, lambda *_: (win.close_all(), False)[1])
+    win.show_all()
+    Gtk.main()
+
+
+if __name__ == "__main__":
+    main()

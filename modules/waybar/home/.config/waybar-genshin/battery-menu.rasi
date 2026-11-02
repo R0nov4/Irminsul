@@ -1,0 +1,64 @@
+* {
+    font: "SDK_SC_Web 12";
+}
+window {
+    location: northeast;
+    anchor: northeast;
+    x-offset: -16px;
+    y-offset: 56px;
+    width: 420px;
+    background-color: #171b26;
+    border: 2px;
+    border-color: #d3bc8e;
+    border-radius: 18px;
+}
+mainbox {
+    padding: 14px;
+    spacing: 10px;
+    background-color: transparent;
+    children: [ message, listview ];
+}
+message {
+    padding: 12px 14px;
+    background-color: #1d2333;
+    border: 1px;
+    border-color: #d3bc8e60;
+    border-radius: 12px;
+}
+textbox {
+    background-color: transparent;
+    text-color: #b9b2a3;
+    vertical-align: 0.0;
+}
+listview {
+    columns: 1;
+    lines: 3;
+    spacing: 6px;
+    scrollbar: false;
+    fixed-height: true;
+    cycle: false;
+    background-color: transparent;
+}
+element {
+    padding: 10px 14px;
+    background-color: #232a3c;
+    border: 1px;
+    border-color: #d3bc8e40;
+    border-radius: 12px;
+    text-color: #ece5d8;
+}
+element normal.normal, element alternate.normal {
+    background-color: #232a3c;
+    text-color: #ece5d8;
+}
+element selected.normal {
+    background-color: #ece5d8;
+    border-color: #d3bc8e;
+    text-color: #2b3144;
+}
+element-text {
+    background-color: transparent;
+    text-color: inherit;
+    highlight: none;
+    vertical-align: 0.5;
+}

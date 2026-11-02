@@ -1,0 +1,88 @@
+configuration {
+    show-icons:                 false;
+    font:                       "SDK_SC_Web Bold 11";
+    hover-select:               true;
+    me-select-entry:            "";
+    me-accept-entry:            "MousePrimary";
+}
+
+* {
+    bg-dark:                    rgba(22, 26, 38, 0.94);
+    bg-card:                    rgba(36, 43, 61, 0.85);
+    cream:                      #ece5d8;
+    gold:                       #c81d2d;
+    gold-bright:                #e0828b;
+    navy:                       #161a26;
+    background-color:           transparent;
+    text-color:                 @cream;
+}
+
+window {
+    transparency:               "real";
+    location:                   center;
+    anchor:                     center;
+    width:                      640px;
+    border:                     2px;
+    border-color:               @gold;
+    border-radius:              18px;
+    background-color:           @bg-dark;
+    padding:                    18px;
+}
+
+mainbox {
+    spacing:                    12px;
+    children:                   [ "inputbar", "listview" ];
+}
+
+inputbar {
+    background-color:           @bg-card;
+    border:                     1px;
+    border-color:               @gold;
+    border-radius:              12px;
+    padding:                    10px 14px;
+    spacing:                    10px;
+    children:                   [ "prompt", "entry" ];
+}
+
+prompt {
+    text-color:                 @gold-bright;
+    font:                       "SDK_SC_Web Bold 11";
+}
+
+entry {
+    placeholder:                "Search copied records in Teyvat Archive...";
+    placeholder-color:          rgba(236, 229, 216, 0.45);
+    text-color:                 @cream;
+}
+
+listview {
+    columns:                    1;
+    lines:                      9;
+    cycle:                      true;
+    dynamic:                    true;
+    layout:                     vertical;
+    spacing:                    6px;
+    scrollbar:                  false;
+}
+
+element {
+    padding:                    10px 14px;
+    border-radius:              10px;
+    background-color:           rgba(255, 255, 255, 0.03);
+    text-color:                 @cream;
+    border:                     1px;
+    border-color:               rgba(211, 188, 142, 0.15);
+}
+
+element selected.normal {
+    background-color:           @cream;
+    text-color:                 @navy;
+    border:                     1px;
+    border-color:               @gold-bright;
+}
+
+element-text {
+    background-color:           transparent;
+    text-color:                 inherit;
+    vertical-align:             0.5;
+}

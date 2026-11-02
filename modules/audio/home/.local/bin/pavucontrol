@@ -1,0 +1,12 @@
+#!/bin/sh
+# Irminsul shim: HyDE (and everything else) calls `pavucontrol` — open Irminsul Settings instead.
+# The real one is still /usr/bin/pavucontrol.
+command -v irminsul-settings >/dev/null 2>&1 || exec /usr/bin/pavucontrol "$@"
+page=outputs
+while [ $# -gt 0 ]; do
+  case "$1" in
+    -t) case "$2" in 1|2) page=streams ;; 3) page=outputs ;; 4) page=inputs ;; 5) page=profiles ;; esac; shift ;;
+  esac
+  shift
+done
+exec irminsul-settings --page "$page"

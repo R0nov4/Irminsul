@@ -1,0 +1,12 @@
+#!/bin/bash
+build() {
+    add_full_dir /usr/share/plymouth/themes/genshin-loading
+    add_file /usr/lib/genshin-daynight/pick.sh /usr/lib/genshin-daynight/pick.sh 755
+    add_file /etc/genshin-daynight.conf /etc/genshin-daynight.conf
+    add_file /usr/lib/systemd/system/genshin-daynight-initrd.service /usr/lib/systemd/system/genshin-daynight-initrd.service
+    add_symlink /usr/lib/systemd/system/sysinit.target.wants/genshin-daynight-initrd.service ../genshin-daynight-initrd.service
+    add_runscript
+}
+help() {
+    echo "Picks the day (06-18) or night (18-06) variant of the Genshin Plymouth theme at boot."
+}

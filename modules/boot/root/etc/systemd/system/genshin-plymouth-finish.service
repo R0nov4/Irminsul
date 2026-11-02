@@ -1,0 +1,13 @@
+[Unit]
+Description=Genshin boot splash finish animation
+DefaultDependencies=no
+After=plymouth-start.service rc-local.service systemd-user-sessions.service
+Before=plymouth-quit.service
+
+[Service]
+Type=oneshot
+TimeoutStartSec=5
+ExecStart=/bin/sh -c '/usr/bin/plymouth --ping && /usr/bin/plymouth update --status=finish && sleep 1.4 || true'
+
+[Install]
+WantedBy=multi-user.target

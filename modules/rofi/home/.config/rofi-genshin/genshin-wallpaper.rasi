@@ -1,0 +1,140 @@
+/* ✦ Genshin Wallpaper Gallery — Inventory style
+   رنگ نادری: ۳★ آبی · ۴★ بنفش (urgent) · ۵★ طلایی (active) */
+* {
+    font:             "HYWenHei 11";
+    deep:             #2E3446;
+    cream:            #ECE5D8;
+    cream-hi:         #FFF3CF;
+    gold:             #c81d2d;
+    mute:             #A9ADBA;
+    background-color: transparent;
+    text-color:       @cream;
+    margin:           0;
+    padding:          0;
+    spacing:          0;
+}
+
+window {
+    location:         center;
+    anchor:           center;
+    width:            1060px;
+    transparency:     "real";
+    background-color: #343B4EF2;
+    border:           2px;
+    border-color:     #ECE5D8AA;
+    border-radius:    10px;
+}
+
+mainbox {
+    padding:  24px 30px 20px 30px;
+    spacing:  16px;
+    children: [ inputbar, listview, message ];
+}
+
+inputbar {
+    padding:      0px 0px 14px 0px;
+    spacing:      16px;
+    border:       0px 0px 2px 0px;
+    border-color: #D3BC8E77;
+    children:     [ prompt, entry ];
+}
+prompt {
+    text-color:     @cream;
+    font:           "HYWenHei 15";
+    vertical-align: 0.5;
+}
+entry {
+    padding:           8px 18px;
+    background-color:  @cream;
+    text-color:        @deep;
+    cursor-color:      @deep;
+    border-radius:     20px;
+    placeholder:       "Search…";
+    placeholder-color: #6B7185;
+}
+
+listview {
+    columns:          4;
+    lines:            2;
+    fixed-columns:    true;
+    layout:           vertical;
+    flow:             horizontal;
+    spacing:          14px;
+    cycle:            true;
+    dynamic:          true;
+    scrollbar:        true;
+    background-color: transparent;
+}
+scrollbar {
+    width:            4px;
+    handle-width:     6px;
+    handle-color:     @gold;
+    background-color: #FFFFFF18;
+    border-radius:    3px;
+    margin:           0px 0px 0px 10px;
+}
+
+/* ───── کارت‌ها ───── */
+element {
+    orientation:   vertical;
+    padding:       0px;
+    spacing:       0px;
+    border:        3px;
+    border-color:  transparent;
+    border-radius: 9px;
+    children:      [ element-icon, element-text ];
+}
+
+/* ۳★ آبی */
+element normal.normal, element alternate.normal {
+    background-color: #5778A8;
+}
+element selected.normal {
+    background-color: #6E91C4;
+    border-color:     @cream-hi;
+}
+/* ۴★ بنفش */
+element normal.urgent, element alternate.urgent {
+    background-color: #8466B8;
+}
+element selected.urgent {
+    background-color: #9A7DCB;
+    border-color:     @cream-hi;
+}
+/* ۵★ طلایی */
+element normal.active, element alternate.active {
+    background-color: #D09A47;
+}
+element selected.active {
+    background-color: #E6B35F;
+    border-color:     @cream-hi;
+}
+
+element-icon {
+    size:             220px;
+    padding:          6px;
+    horizontal-align: 0.5;
+    vertical-align:   0.5;
+    background-color: transparent;
+}
+element-text {
+    padding:          8px 8px;
+    horizontal-align: 0.5;
+    vertical-align:   0.5;
+    highlight:        none;
+    font:             "HYWenHei 10";
+    text-color:       @deep;
+    background-color: #E9E2D3;
+    border-radius:    0px 0px 6px 6px;
+}
+
+message {
+    padding:      12px 0px 0px 0px;
+    border:       1px 0px 0px 0px;
+    border-color: #D3BC8E55;
+}
+textbox {
+    horizontal-align: 0.5;
+    text-color:       @mute;
+    font:             "HYWenHei 10";
+}

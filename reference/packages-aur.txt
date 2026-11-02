@@ -1,0 +1,17 @@
+android-sdk-build-tools
+claude-desktop
+fluxcast
+google-chrome
+hyprquery-git
+hyprquery-git-debug
+lantern
+localsend-bin
+v2rayn-bin
+visual-studio-code-bin
+win2xcur
+wlogout
+wlogout-debug
+xcursor-samtoki-genshin-impact
+yay
+yay-debug
+zulu-26-fx-bin-debug

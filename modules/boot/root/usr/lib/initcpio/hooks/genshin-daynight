@@ -1,0 +1,4 @@
+#!/usr/bin/ash
+run_earlyhook() {
+    /usr/lib/genshin-daynight/pick.sh /usr/share/plymouth/themes/genshin-loading
+}

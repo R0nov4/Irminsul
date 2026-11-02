@@ -1,0 +1,25 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 96 96" width="96" height="96">
+  <defs>
+    <radialGradient id="disc" cx="48" cy="40" r="48" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#4d566d"/>
+      <stop offset="1" stop-color="#262b3a"/>
+    </radialGradient>
+    <radialGradient id="aura" cx="48" cy="48" r="34" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#f4803c" stop-opacity="0.38"/>
+      <stop offset="1" stop-color="#f4803c" stop-opacity="0"/>
+    </radialGradient>
+  </defs>
+  <circle cx="48" cy="48" r="42" fill="url(#disc)" stroke="#f08a4a" stroke-width="2.4"/>
+  <circle cx="48" cy="48" r="36.5" fill="none" stroke="#f08a4a" stroke-width="0.9" opacity="0.5"/>
+  <circle cx="48" cy="48" r="36" fill="url(#aura)"/>
+  <g fill="#f08a4a">
+    <polygon points="48,1.5 51.5,6 48,10.5 44.5,6"/>
+    <polygon points="94.5,48 90,51.5 85.5,48 90,44.5"/>
+    <polygon points="48,94.5 44.5,90 48,85.5 51.5,90"/>
+    <polygon points="1.5,48 6,44.5 10.5,48 6,51.5"/>
+  </g>
+  <g transform="translate(0,4)">
+<path fill="#f4803c" d="M48 17 C52 27 63 31 61 46 C60 57 53 65 48 65 C42 65 34 59 34 49 C34 43 38 39 41 36 C41 41 43 43 45 44 C44 35 45 26 48 17 Z"/>
+<path fill="#ffd9a0" d="M48 40 C51 46 55 49 55 54 C55 59 52 61 48 61 C44 61 41 58 41 54 C41 50 45 48 48 40 Z"/>
+  </g>
+</svg>

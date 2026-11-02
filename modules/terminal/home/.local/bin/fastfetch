@@ -1,0 +1,17 @@
+#!/usr/bin/env bash
+FF_DIR="$HOME/.config/fastfetch-genshin"
+
+if [ "${GENSHIN_CHAR:-}" = "fixed" ] && [ -f "$FF_DIR/traveler-card.png" ]; then
+    cp -f "$FF_DIR/traveler-card.png" "$FF_DIR/current.png" 2>/dev/null
+elif [ -n "${GENSHIN_CHAR:-}" ] && [ -f "$FF_DIR/cards/${GENSHIN_CHAR}.png" ]; then
+    cp -f "$FF_DIR/cards/${GENSHIN_CHAR}.png" "$FF_DIR/current.png" 2>/dev/null
+else
+    shopt -s nullglob
+    cards=("$FF_DIR"/cards/*.png)
+    if [ ${#cards[@]} -gt 0 ]; then
+        pick="${cards[RANDOM % ${#cards[@]}]}"
+        cp -f "$pick" "$FF_DIR/current.png" 2>/dev/null
+    fi
+fi
+
+exec /usr/bin/fastfetch -c "$FF_DIR/config.jsonc"

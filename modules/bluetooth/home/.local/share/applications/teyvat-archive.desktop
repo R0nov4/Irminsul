@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=Teyvat Archive
+GenericName=Bluetooth Manager
+Comment=Genshin-styled Bluetooth manager (BlueZ / D-Bus)
+Exec=@HOME@/.local/bin/teyvat-archive
+Icon=bluetooth
+Categories=Settings;HardwareSettings;GTK;
+Keywords=bluetooth;bluez;genshin;headphones;tv;audio;volume;

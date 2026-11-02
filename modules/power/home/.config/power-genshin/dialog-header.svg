@@ -1,0 +1,12 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="560" height="76" viewBox="0 0 560 76">
+  <rect width="560" height="76" fill="#3b4255"/>
+  <!-- خطوط طلایی تزئینی هدر دیالوگ بازی -->
+  <line x1="36" y1="64" x2="256" y2="64" stroke="#d3bc8e" stroke-width="1.5" opacity="0.7"/>
+  <line x1="304" y1="64" x2="524" y2="64" stroke="#d3bc8e" stroke-width="1.5" opacity="0.7"/>
+  <!-- ستاره چهارپر وسط خط -->
+  <path fill="#f4e8c1" d="M280 54 C282 61 284 63 291 64 C284 65 282 67 280 74 C278 67 276 65 269 64 C276 63 278 61 280 54 Z"/>
+  <!-- گوشه‌های هندسی طلایی -->
+  <polyline points="18,32 18,16 34,16" fill="none" stroke="#d3bc8e" stroke-width="2" opacity="0.8"/>
+  <polyline points="542,32 542,16 526,16" fill="none" stroke="#d3bc8e" stroke-width="2" opacity="0.8"/>
+  <text x="280" y="42" font-family="SDK_SC_Web, HYWenHei-85W, sans-serif" font-size="19" font-weight="bold" fill="#ece5d8" letter-spacing="2" text-anchor="middle">Leave Teyvat?</text>
+</svg>

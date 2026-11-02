@@ -1,0 +1,90 @@
+* {
+    gold:        #c81d2d;
+    gold-bright: #e0828b;
+    slate:       #323a4d;
+    slate-card:  #3d4559;
+    cream:       #ece5d8;
+    ink:         #3b4255;
+
+    background-color: transparent;
+    text-color:       @cream;
+    font:             "Noto Sans 11";
+}
+
+window {
+    width:            1100px;
+    location:         center;
+    anchor:           center;
+    background-color: @slate;
+    border:           2px;
+    border-color:     @gold;
+    border-radius:    20px;
+}
+
+mainbox {
+    padding:  22px 28px 28px 28px;
+    spacing:  18px;
+    children: [ message, listview ];
+}
+
+message {
+    padding:      0px 0px 14px 0px;
+    border:       0px 0px 1px 0px;
+    border-color: @gold;
+}
+textbox { markup: true; horizontal-align: 0.5; text-color: @cream; }
+
+inputbar {
+    padding:          10px 16px;
+    spacing:          10px;
+    border-radius:    12px;
+    border:           1px;
+    border-color:     #ffffff1f;
+    background-color: #262c3b;
+    children:         [ prompt, entry ];
+}
+prompt { text-color: @gold; }
+entry  { text-color: @cream; placeholder: "Type here…"; placeholder-color: #ece5d899; }
+
+listview {
+    columns:       6;
+    lines:         2;
+    fixed-columns: true;
+    spacing:       14px;
+    scrollbar:     true;
+    cycle:         false;
+}
+scrollbar {
+    handle-width:     5px;
+    handle-color:     @gold;
+    background-color: #ffffff14;
+    border-radius:    4px;
+    margin:           0px 0px 0px 10px;
+}
+
+element {
+    orientation:      vertical;
+    padding:          12px;
+    spacing:          10px;
+    border:           2px;
+    border-radius:    14px;
+    border-color:     #00000000;
+    background-color: @slate-card;
+    text-color:       @cream;
+    cursor:           pointer;
+}
+element selected.normal {
+    background-color: @cream;
+    text-color:       @ink;
+    border-color:     @gold;
+}
+element-icon {
+    size:          128px;
+    border-radius: 10px;
+}
+element-text {
+    horizontal-align: 0.5;
+    vertical-align:   0.5;
+    text-color:       inherit;
+    font:             "Noto Sans 10";
+}

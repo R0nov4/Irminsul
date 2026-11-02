@@ -1,0 +1,11 @@
+[SddmGreeterTheme]
+Name=Genshin
+Description=Genshin Impact style login screen
+Author=Taha Alidoosti
+Type=sddm-theme
+Version=1.0
+MainScript=Main.qml
+ConfigFile=theme.conf
+Theme-Id=genshin
+Theme-API=2.0
+QtVersion=6

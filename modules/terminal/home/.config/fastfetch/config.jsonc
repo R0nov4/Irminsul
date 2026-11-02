@@ -1,0 +1,94 @@
+{
+    "$schema": "https://github.com/fastfetch-cli/fastfetch/raw/dev/doc/json_schema.json",
+    "logo": {
+        "type": "kitty-direct",
+        "source": "@HOME@/.config/fastfetch-genshin/current.png",
+        "width": 22,
+        "height": 12,
+        "padding": {
+            "top": 0,
+            "left": 1,
+            "right": 2
+        }
+    },
+    "display": {
+        "separator": "  ",
+        "color": {
+            "keys": "#d3bc8e",
+            "title": "#f4e8c1"
+        }
+    },
+    "modules": [
+        {
+            "type": "custom",
+            "format": "\u001b[1;38;2;244;232;193m╭────────────  ✦  TRAVELER PROFILE  ✦  ────────────╮\u001b[0m"
+        },
+        {
+            "type": "custom",
+            "key": " ✦ Traveler  ",
+            "keyColor": "#f4e8c1",
+            "format": "\u001b[1;38;2;236;229;216mTraveler\u001b[0m \u001b[38;2;211;188;142m·\u001b[0m \u001b[1;38;2;126;200;255mAR 60\u001b[0m \u001b[38;2;116;194;168m━━━━━━━━━━\u001b[0m \u001b[1;38;2;244;232;193mWL 9\u001b[0m"
+        },
+        {
+            "type": "os",
+            "key": " ❖ Nation    ",
+            "keyColor": "#7ec8ff",
+            "format": "{name} ({arch})"
+        },
+        {
+            "type": "kernel",
+            "key": " ❖ Ley Line  ",
+            "keyColor": "#74c2a8",
+            "format": "{sysname} {release}"
+        },
+        {
+            "type": "wm",
+            "key": " ❖ Domain    ",
+            "keyColor": "#b38bd6",
+            "format": "{pretty-name} · {protocol-name}"
+        },
+        {
+            "type": "packages",
+            "key": " ❖ Artifacts ",
+            "keyColor": "#fab632"
+        },
+        {
+            "type": "uptime",
+            "key": " ❖ Journey   ",
+            "keyColor": "#a5c83b"
+        },
+        {
+            "type": "custom",
+            "format": "\u001b[38;2;211;188;142m├────────────  ◈  CELESTIAL FORGE   ◈  ────────────┤\u001b[0m"
+        },
+        {
+            "type": "cpu",
+            "key": " ◈ Gnosis    ",
+            "keyColor": "#ff7b54",
+            "format": "{name} ({cores-logical}x)"
+        },
+        {
+            "type": "gpu",
+            "key": " ◈ Vision    ",
+            "keyColor": "#4cc2f1",
+            "format": "{name}"
+        },
+        {
+            "type": "memory",
+            "key": " ◈ Resin     ",
+            "keyColor": "#90e0ef",
+            "format": "{used} / {total} ({percentage})"
+        },
+        {
+            "type": "disk",
+            "key": " ◈ Inventory ",
+            "keyColor": "#d3bc8e",
+            "folders": "/",
+            "format": "{size-used} / {size-total} ({size-percentage})"
+        },
+        {
+            "type": "custom",
+            "format": "\u001b[1;38;2;244;232;193m╰───  ✦  \"Ad Astra Abyssosque, Traveler!\"  ✦  ───╯\u001b[0m"
+        }
+    ]
+}

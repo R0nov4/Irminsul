@@ -1,0 +1,193 @@
+{
+    "layer": "top",
+    "position": "top",
+    "height": 48,
+    "margin-top": 6,
+    "margin-left": 16,
+    "margin-right": 16,
+    "spacing": 4,
+    "modules-left": [
+        "custom/paimon",
+        "hyprland/workspaces",
+        "hyprland/window"
+    ],
+    "modules-center": [
+        "custom/daynight",
+        "clock"
+    ],
+    "modules-right": [
+        "hyprland/language",
+        "custom/ping",
+        "cpu",
+        "memory",
+        "pulseaudio",
+        "group/extras"
+    ],
+    "group/extras": {
+        "orientation": "inherit",
+        "drawer": {
+            "transition-duration": 300,
+            "transition-left-to-right": false,
+            "click-to-reveal": true
+        },
+        "modules": [
+            "group/tail",
+            "custom/handbook",
+            "custom/mail",
+            "network", "bluetooth", "tray"
+        ]
+    },
+    "group/tail": {
+        "orientation": "inherit",
+        "spacing": 4,
+        "modules": ["custom/ar", "custom/wish", "custom/bat"]
+    },
+    "custom/paimon": {
+        "format": " ",
+        "on-click": "@HOME@/.config/rofi-genshin/launch.sh",
+        "tooltip-format": "Paimon Menu"
+    },
+    "hyprland/workspaces": {
+        "disable-scroll": false,
+        "all-outputs": true,
+        "on-click": "activate",
+        "persistent-workspaces": {
+            "1": [],
+            "2": [],
+            "3": [],
+            "4": [],
+            "5": [],
+            "6": [],
+            "7": []
+        },
+        "format": " "
+    },
+    "hyprland/window": {
+        "format": "{title}",
+        "max-length": 16,
+        "separate-outputs": true
+    },
+    "custom/daynight": {
+        "exec": "$HOME/.config/waybar-genshin/scripts/daynight.sh",
+        "return-type": "json",
+        "interval": 60
+    },
+    "clock": {
+        "format": "{:%H:%M  •  %a %d %b}",
+        "tooltip-format": "<big>{:%Y %B}</big>\n<tt><small>{calendar}</small></tt>"
+    },
+    "custom/ar": {
+        "exec": "$HOME/.config/waybar-genshin/scripts/ar.sh",
+        "return-type": "json",
+        "interval": 60
+    },
+    "custom/ping": {
+        "exec": "$HOME/.config/waybar-genshin/scripts/ping.sh",
+        "return-type": "json",
+        "interval": 5
+    },
+    "cpu": {
+        "interval": 3,
+        "format": "{usage}/160",
+        "tooltip-format": "Original Resin (CPU Load)"
+    },
+    "memory": {
+        "interval": 5,
+        "format": "{used:0.1f}G",
+        "tooltip-format": "Mora (RAM): {used:0.1f}G / {total:0.1f}G"
+    },
+    "pulseaudio": {
+        "format": "{volume}",
+        "format-muted": "0",
+        "on-click": "@HOME@/.local/bin/irminsul-volume",
+        "tooltip-format": "Primogems (Volume): {volume}%",
+        "on-scroll-up": "@HOME@/.config/osd-genshin/vol.sh up 5",
+        "on-scroll-down": "@HOME@/.config/osd-genshin/vol.sh down 5",
+        "on-click-right": "@HOME@/.local/bin/irminsul-settings"
+    },
+    "custom/handbook": {
+        "format": " ",
+        "on-click": "sh -c 'grim -g \"$(slurp)\" - | wl-copy'",
+        "tooltip-format": "Adventurer's Handbook (Screenshot)"
+    },
+    "custom/mail": {
+        "exec": "$HOME/.config/waybar-genshin/scripts/mail.sh",
+        "return-type": "json",
+        "interval": 10,
+        "on-click": "$HOME/.config/waybar-genshin/scripts/mail-click.sh show",
+        "on-click-right": "$HOME/.config/waybar-genshin/scripts/mail-click.sh clear"
+    },
+"network": {
+        "format": " ",
+        "format-wifi": " ",
+        "format-ethernet": " ",
+        "format-disconnected": " ",
+        "format-linked": " ",
+        "format-disabled": " ",
+        "on-click-middle": "@HOME@/.config/waybar-genshin/scripts/genshin-wifi.sh --settings",
+        "on-click-right": "@HOME@/.config/waybar-genshin/scripts/genshin-wifi.sh --akasha",
+        "tooltip-format": "{essid} ({signalStrength}%)\n{ipaddr}",
+        "on-click": "@HOME@/.config/waybar-genshin/scripts/genshin-wifi.sh --mini",
+        "interval": 2
+    },
+    "bluetooth": {
+        "format": " ",
+        "format-on": " ",
+        "format-off": " ",
+        "format-disabled": " ",
+        "format-connected": " ",
+        "tooltip-format": "Bluetooth: {status}",
+        "tooltip-format-connected": "Bluetooth\n{device_enumerate}",
+        "tooltip-format-enumerate-connected": "{device_alias}",
+        "on-click": "$HOME/.local/bin/genshin-bluetooth",
+        "on-click-right": "$HOME/.local/bin/teyvat-archive"
+    },
+    "tray": {
+        "icon-size": 16,
+        "spacing": 4
+    },
+    "custom/wish": {
+        "on-click": "@HOME@/.config/power-genshin/launch.sh",
+        "format": " ",
+        "tooltip-format": "Wish / Power Menu"
+    },
+    "hyprland/language": {
+        "format": "{}",
+        "format-en": "EN",
+        "format-fa": "FA",
+        "format-ir": "FA",
+        "on-click": "hyprctl switchxkblayout all next",
+        "tooltip-format": "Language of Teyvat: {long}",
+        "max-length": 8,
+        "tooltip": true
+    },
+    "backlight": {
+        "format": "✦ {percent}%",
+        "on-scroll-up": "@HOME@/.config/osd-genshin/bri.sh up 5",
+        "on-scroll-down": "@HOME@/.config/osd-genshin/bri.sh down 5",
+        "device": "intel_backlight"
+    },
+    "battery": {
+        "interval": 10,
+        "states": {
+            "good": 90,
+            "warning": 30,
+            "critical": 15
+        },
+        "format": "{capacity}%",
+        "format-charging": "{capacity}%",
+        "format-plugged": "{capacity}%",
+        "tooltip-format": "Elemental Energy: {capacity}%\n{timeTo}\nPower flow: {power} W\nVessel health: {health}%\nCharge cycles: {cycles}",
+        "tooltip": true,
+        "on-click": "python3 @HOME@/.config/waybar-genshin/scripts/battery-menu.py"
+    },
+    "custom/bat": {
+        "exec": "@HOME@/.config/waybar-genshin/scripts/battery-status.sh",
+        "return-type": "json",
+        "format": "{}",
+        "tooltip": true,
+        "on-click": "python3 @HOME@/.config/waybar-genshin/scripts/battery-menu.py",
+        "on-scroll-up": "@HOME@/.config/osd-genshin/bri.sh up 5",
+        "on-scroll-down": "@HOME@/.config/osd-genshin/bri.sh down 5"
+    }
+}

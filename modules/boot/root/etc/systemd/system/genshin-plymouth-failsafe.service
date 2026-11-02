@@ -1,0 +1,10 @@
+[Unit]
+Description=Genshin boot splash failsafe (force Plymouth to quit if it hangs)
+After=plymouth-start.service
+
+[Service]
+Type=simple
+ExecStart=/bin/sh -c 'sleep 25; /usr/bin/plymouth --ping && /usr/bin/plymouth quit || true'
+
+[Install]
+WantedBy=multi-user.target

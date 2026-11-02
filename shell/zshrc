@@ -1,0 +1,30 @@
+# Genshin standalone zsh config.
+# Only used on setups with no other zsh config (e.g. a fresh Arch install).
+# If ~/.zshenv sets ZDOTDIR (HyDE), zsh never reads this file.
+
+export PATH="$HOME/.local/bin:$PATH"
+
+HISTFILE="${XDG_STATE_HOME:-$HOME/.local/state}/zsh/history"
+mkdir -p "${HISTFILE:h}"
+HISTSIZE=10000; SAVEHIST=10000
+setopt HIST_IGNORE_DUPS SHARE_HISTORY INTERACTIVE_COMMENTS
+
+autoload -Uz compinit && compinit -C
+
+alias c='clear' ..='cd ..' ...='cd ../..' mkdir='mkdir -p'
+alias fastfetch="$HOME/.local/bin/fastfetch"
+
+command -v starship >/dev/null 2>&1 && eval "$(starship init zsh)"
+
+# Traveler card in every new kitty window (random card from ~/.config/fastfetch-genshin/cards)
+if [[ -o interactive && -n "$KITTY_WINDOW_ID" && -x "$HOME/.local/bin/fastfetch" ]]; then
+  clear
+  "$HOME/.local/bin/fastfetch"
+fi
+
+ZSH_AUTOSUGGEST_HIGHLIGHT_STYLE='fg=245'
+
+# syntax-highlighting must be sourced last
+for p in zsh-autosuggestions zsh-syntax-highlighting; do
+  [[ -r /usr/share/zsh/plugins/$p/$p.zsh ]] && source /usr/share/zsh/plugins/$p/$p.zsh
+done
