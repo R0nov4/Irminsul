@@ -15,7 +15,7 @@
 ![GTK3](https://img.shields.io/badge/GTK3-7FE719?style=for-the-badge&logo=gtk&logoColor=black)
 ![Python](https://img.shields.io/badge/Python-3776AB?style=for-the-badge&logo=python&logoColor=white)
 <br>
-![Version](https://img.shields.io/badge/version-1.0.0-f5c542?style=for-the-badge&labelColor=1a1a2e)
+![Version](https://img.shields.io/badge/version-1.0.2-f5c542?style=for-the-badge&labelColor=1a1a2e)
 ![Modules](https://img.shields.io/badge/modules-17-ff9d5c?style=for-the-badge&labelColor=1a1a2e)
 ![Stars](https://img.shields.io/github/stars/R0nov4/irminsul?style=for-the-badge&color=f5c542&labelColor=1a1a2e)
 ![Last commit](https://img.shields.io/github/last-commit/R0nov4/irminsul?style=for-the-badge&color=9b7dff&labelColor=1a1a2e)
@@ -380,6 +380,7 @@ cd irminsul
 | `--apply` | Apply user configs |
 | `--system` | Install system-level parts (SDDM) |
 | `--boot` | Install the Plymouth boot screen |
+| `--update`     | git pull, then re-apply only the installed modules |
 | `--only a,b,c` | Limit the install to the listed modules |
 
 </details>

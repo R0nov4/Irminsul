@@ -40,7 +40,22 @@ IDX=$({
 case "$IDX" in
     0) systemctl poweroff ;;
     1) systemctl reboot ;;
-    2) uwsm stop 2>/dev/null || hyprctl dispatch exit ;;
+    2)
+        # uwsm-managed session: stop it cleanly. Otherwise (SDDM starts Hyprland directly)
+        # prefer hyprshutdown, then the Lua dispatcher. Hyprland 0.55+ no longer accepts
+        # the old "hyprctl dispatch exit" syntax.
+        if command -v uwsm >/dev/null 2>&1 && uwsm check is-active >/dev/null 2>&1; then
+            timeout 10 uwsm stop >/dev/null 2>&1
+            # if the session is still alive here, uwsm stop did not end the session:
+            # fall back to the Lua exit dispatcher (this script dies first when it worked)
+            sleep 4
+            hyprctl dispatch 'hl.dsp.exit()'
+        elif command -v hyprshutdown >/dev/null 2>&1; then
+            hyprshutdown
+        else
+            hyprctl dispatch 'hl.dsp.exit()'
+        fi
+        ;;
     3)
         if [ -x "$HOME/.config/hyprlock-genshin/launch.sh" ]; then
             "$HOME/.config/hyprlock-genshin/launch.sh"

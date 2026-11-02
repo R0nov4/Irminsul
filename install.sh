@@ -9,16 +9,43 @@
 #   --only a,b                                  only these modules
 set -uo pipefail
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-APPLY=0; SYSTEM=0; BOOT=0; DEPS=0; ONLY=""
+ARGS=("$@")
+APPLY=0; SYSTEM=0; BOOT=0; DEPS=0; UPDATE=0; ONLY=""
 while [ $# -gt 0 ]; do
   case "$1" in
     --apply) APPLY=1;; --system) SYSTEM=1;; --boot) BOOT=1;; --deps) DEPS=1;;
+    --update) UPDATE=1; APPLY=1;;
     --only) shift; ONLY="${1:-}";;
     *) echo "unknown option: $1"; exit 1;;
   esac; shift
 done
 
 # نصب خودکار تمام پیش‌نیازهای دسکتاپ جنشین روی آرچ لینوکس خام
+# --update: git pull first, then re-run the (possibly new) script
+if [ "$UPDATE" = 1 ] && [ -z "${GS_UPDATED:-}" ]; then
+  if [ -d "$REPO/.git" ] && command -v git >/dev/null 2>&1; then
+    echo "== Update: git pull =="
+    git -C "$REPO" pull --ff-only || { echo "[ERROR] git pull failed (local changes?). Check: git -C $REPO status"; exit 1; }
+  else
+    echo "== Update: not a git checkout, skipping pull =="
+  fi
+  exec env GS_UPDATED=1 bash "${BASH_SOURCE[0]}" "${ARGS[@]}"
+fi
+
+# a module counts as installed if any of its files already exists at the destination
+is_installed() {
+  local d="$1" base f t
+  for base in home root; do
+    [ -d "$d/$base" ] || continue
+    while IFS= read -r -d '' f; do
+      f="${f#./}"
+      if [ "$base" = home ]; then t="$HOME/$f"; else t="/$f"; fi
+      if [ -e "$t" ] || [ -L "$t" ]; then return 0; fi
+    done < <(cd "$d/$base" && find . \( -type f -o -type l \) -print0)
+  done
+  return 1
+}
+
 if [ "$DEPS" = 1 ]; then
   PKGS=(
     hyprland hyprlock hypridle hyprpicker xdg-desktop-portal-hyprland
@@ -84,6 +111,7 @@ install_tree() {   # src dst sudo-prefix backup-root
 for d in "$REPO"/modules/*/; do
   m=$(basename "$d")
   if [ -n "$ONLY" ] && [[ ",$ONLY," != *",$m,"* ]]; then continue; fi
+  if [ "$UPDATE" = 1 ] && [ -z "$ONLY" ] && ! is_installed "$d"; then echo "-- $m (not installed, skipped)"; continue; fi
   echo "-- $m"
   [ -d "$d/home" ] && install_tree "$d/home" "$HOME" "" "$HOME/.genshin-backup/$TS"
   if [ -d "$d/root" ]; then
@@ -97,6 +125,7 @@ if [ "$APPLY" = 1 ]; then
   for d in "$REPO"/modules/*/; do
     m=$(basename "$d")
     if [ -n "$ONLY" ] && [[ ",$ONLY," != *",$m,"* ]]; then continue; fi
+    if [ "$UPDATE" = 1 ] && [ -z "$ONLY" ] && ! is_installed "$d"; then continue; fi
     if [ -f "$d/install.sh" ]; then
       echo "-- $m: module installer"
       bash "$d/install.sh" || echo "!  $m installer failed"
@@ -104,7 +133,7 @@ if [ "$APPLY" = 1 ]; then
   done
   # shell: install the standalone zsh config (only if the user has no zsh setup of their own,
   # so HyDE / custom setups are never touched), then make zsh the login shell
-  if [ -z "$ONLY" ] || [[ ",$ONLY," == *",terminal,"* ]]; then
+  if [ "$UPDATE" = 0 ] && { [ -z "$ONLY" ] || [[ ",$ONLY," == *",terminal,"* ]]; }; then
     if [ ! -r /usr/share/zsh/plugins/zsh-autosuggestions/zsh-autosuggestions.zsh ] && command -v pacman >/dev/null 2>&1; then
       sudo pacman -S --needed --noconfirm zsh zsh-autosuggestions zsh-syntax-highlighting starship
     fi
@@ -204,4 +233,8 @@ fi
 
 echo; echo "new=$new  changed=$changed  unchanged=$same"
 [ "$APPLY" = 1 ] && echo "backups of replaced files: ~/.genshin-backup/$TS"
+if [ "$UPDATE" = 1 ]; then
+  echo "(modules that are not installed were skipped; force one with: ./install.sh --update --only NAME)"
+  [ -f "$REPO/doctor.sh" ] && bash "$REPO/doctor.sh"
+fi
 exit 0
