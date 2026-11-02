@@ -1,7 +1,7 @@
 <div align="center">
 
 <!-- 📸 Optional: replace this generated header with your own wide banner → reference/banner.png (1600×600) -->
-<img src="https://capsule-render.vercel.app/api?type=waving&height=260&color=0:0d0b1e,45:3b2f6b,100:f5c542&text=IRMINSUL&fontColor=f5c542&fontSize=84&fontAlignY=38&desc=A%20complete%20Genshin%20Impact%20desktop%20for%20Arch%20%2B%20Hyprland&descAlignY=60&descSize=20&animation=fadeIn" alt="Irminsul" width="100%">
+<img src="reference/banner.png" alt="Irminsul" width="100%">
 
 <a href="https://github.com/R0nov4/irminsul">
   <img src="https://readme-typing-svg.demolab.com?font=Cinzel&weight=600&size=21&duration=3200&pause=900&color=F5C542&center=true&vCenter=true&width=760&lines=Boot+%C2%B7+Login+%C2%B7+Bar+%C2%B7+Launcher+%C2%B7+Lock+%C2%B7+Power;Wi-Fi+%C2%B7+Bluetooth+%C2%B7+Sound+%C2%B7+Battery+%C2%B7+Polkit;Icons+%C2%B7+File+Chooser+%C2%B7+Screenshots+%C2%B7+Terminal;17+modules.+One+installer.+Zero+frameworks." alt="Irminsul features">
