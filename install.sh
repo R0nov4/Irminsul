@@ -20,7 +20,6 @@ while [ $# -gt 0 ]; do
   esac; shift
 done
 
-# نصب خودکار تمام پیش‌نیازهای دسکتاپ جنشین روی آرچ لینوکس خام
 # --update: git pull first, then re-run the (possibly new) script
 if [ "$UPDATE" = 1 ] && [ -z "${GS_UPDATED:-}" ]; then
   if [ -d "$REPO/.git" ] && command -v git >/dev/null 2>&1; then
