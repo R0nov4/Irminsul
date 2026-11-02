@@ -22,14 +22,14 @@ done
 if [ "$DEPS" = 1 ]; then
   PKGS=(
     hyprland hyprlock hypridle hyprpicker xdg-desktop-portal-hyprland
-    waybar rofi dunst libnotify kitty fastfetch starship zsh zsh-autosuggestions zsh-syntax-highlighting
+    waybar rofi-wayland dunst libnotify kitty fastfetch starship zsh zsh-autosuggestions zsh-syntax-highlighting
     awww grim slurp swappy wl-clipboard cliphist
     tesseract tesseract-data-eng tesseract-data-fas zbar qrencode iproute2
     pipewire wireplumber pamixer playerctl brightnessctl
     polkit polkit-kde-agent network-manager-applet blueman udiskie
     sddm qt6-svg qt6-declarative qt6-5compat qt6-imageformats
     plymouth librsvg python-pillow python-gobject python-cairo gtk3 imagemagick jq curl xorg-xcursorgen
-    ttf-jetbrains-mono-nerd noto-fonts python-gobject python-cairo gtk3 gtk-layer-shell libpulse 
+    ttf-jetbrains-mono-nerd noto-fonts gtk-layer-shell libpulse 
     pipewire-pulse python-numpy
     uwsm bluez bluez-utils power-profiles-daemon pipewire-audio
     adwaita-icon-theme
@@ -127,11 +127,16 @@ fi
 [ "$APPLY" = 1 ] && [ "$SYSTEM" = 1 ] && sudo systemctl daemon-reload >/dev/null 2>&1 || true
 
 # swww was renamed to awww; keep the old command names working for the theme scripts
-if [ "$APPLY" = 1 ] && [ "$SYSTEM" = 1 ]; then
+if [ "$APPLY" = 1 ]; then
   for pair in swww:awww swww-daemon:awww-daemon; do
     old="${pair%%:*}"; new="${pair##*:}"
     if ! command -v "$old" >/dev/null 2>&1 && command -v "$new" >/dev/null 2>&1; then
-      sudo ln -sf "$(command -v "$new")" "/usr/local/bin/$old" && echo "SHIM: /usr/local/bin/$old -> $(command -v "$new")"
+      if [ "$SYSTEM" = 1 ]; then
+        sudo ln -sf "$(command -v "$new")" "/usr/local/bin/$old" && echo "SHIM: /usr/local/bin/$old -> $(command -v "$new")"
+      else
+        mkdir -p "$HOME/.local/bin"
+        ln -sf "$(command -v "$new")" "$HOME/.local/bin/$old" && echo "SHIM: ~/.local/bin/$old -> $(command -v "$new")"
+      fi
     fi
   done
 fi
