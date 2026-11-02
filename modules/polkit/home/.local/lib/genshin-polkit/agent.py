@@ -37,6 +37,38 @@ if not os.environ.get("GENSHIN_POLKIT_REEXEC"):
             os.environ["LD_PRELOAD"] = (_ls + " " + _pre).strip()
             os.execv(sys.executable, [sys.executable] + sys.argv)
 
+# If the agent starts before the compositor is up, Gtk fails to initialise, the agent
+# still registers with polkitd, and then rejects every request. Wait for the socket first.
+def _wait_for_display(timeout=60.0):
+    import glob
+    import stat
+    import time
+    rt = os.environ.get("XDG_RUNTIME_DIR") or "/run/user/%d" % os.getuid()
+    end = time.time() + timeout
+    while True:
+        names = []
+        if os.environ.get("WAYLAND_DISPLAY"):
+            names.append(os.environ["WAYLAND_DISPLAY"])
+        names += [os.path.basename(p) for p in sorted(glob.glob(os.path.join(rt, "wayland-*")))
+                  if not p.endswith(".lock")]
+        for n in names:
+            p = n if os.path.isabs(n) else os.path.join(rt, n)
+            try:
+                if stat.S_ISSOCK(os.stat(p).st_mode):
+                    os.environ["WAYLAND_DISPLAY"] = n
+                    return True
+            except OSError:
+                pass
+        if time.time() >= end:
+            return False
+        time.sleep(0.25)
+
+
+if not _wait_for_display():
+    if not os.environ.get("DISPLAY"):
+        print("genshin-polkit: no display after 60s, giving up", file=sys.stderr, flush=True)
+        sys.exit(1)
+
 import fcntl
 import grp
 import pwd
