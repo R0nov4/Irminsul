@@ -403,7 +403,7 @@ cd irminsul
 <summary><b>Single-file standalone installers</b></summary>
 <br>
 
-Every module is also built as a self-extracting script in `dist/`. Each one works on its own:
+Every module is also built as a self-extracting script in `dist/`(Download dist files from the releases page). Each one works on its own:
 
 ```bash
 ./dist/genshin-all.sh --deps --apply --system --boot     # everything
