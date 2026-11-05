@@ -632,6 +632,7 @@ irminsul/
 
 ### v1.1.0
 - 🌦️ **Added weather** — the new `forecast` module: the **Teyvat Forecast** popup and a weather capsule in the bar.
+- 🔄 The bar's day/night capsule is now the weather capsule (it still shows a sun or moon, and a click opens the forecast).
 
 <br>
 

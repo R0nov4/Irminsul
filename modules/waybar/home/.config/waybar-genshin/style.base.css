@@ -513,3 +513,25 @@ window#waybar #bluetooth:hover {
     border-color: #ffffff;
 }
 /* <<< genshin-bt-icon <<< */
+
+/* >>> genshin-weather >>> */
+window#waybar #custom-weather {
+    color: #f4e8c1;
+    background-color: rgba(18, 22, 30, 0.92);
+    border: 1.5px solid rgba(211, 188, 142, 0.75);
+    border-radius: 18px;
+    padding: 0 10px 0 28px;
+    margin: 3px 1px;
+    background-repeat: no-repeat;
+    background-position: 8px center;
+    background-size: 16px 16px;
+    transition: background-color 200ms ease, border-color 200ms ease;
+}
+window#waybar #custom-weather.day   { background-image: url("@HOME@/.config/waybar-genshin/assets/sun.svg"); }
+window#waybar #custom-weather.night { background-image: url("@HOME@/.config/waybar-genshin/assets/moon.svg"); }
+window#waybar #custom-weather.offline { opacity: 0.6; }
+window#waybar #custom-weather:hover {
+    background-color: rgba(211, 188, 142, 0.25);
+    border-color: #ffffff;
+}
+/* <<< genshin-weather <<< */

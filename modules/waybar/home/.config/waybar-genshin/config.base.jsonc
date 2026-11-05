@@ -12,7 +12,7 @@
         "hyprland/window"
     ],
     "modules-center": [
-        "custom/daynight",
+        "custom/weather",
         "clock"
     ],
     "modules-right": [
@@ -67,10 +67,11 @@
         "max-length": 16,
         "separate-outputs": true
     },
-    "custom/daynight": {
-        "exec": "$HOME/.config/waybar-genshin/scripts/daynight.sh",
+    "custom/weather": {
+        "exec": "$HOME/.config/waybar-genshin/scripts/weather.sh",
+        "on-click": "$HOME/.local/bin/teyvat-forecast toggle",
         "return-type": "json",
-        "interval": 60
+        "interval": 600
     },
     "clock": {
         "format": "{:%H:%M  •  %a %d %b}",
