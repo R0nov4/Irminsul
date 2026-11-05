@@ -1,4 +1,5 @@
 import QtQuick
+import Quickshell.Widgets
 import Quickshell
 import Quickshell.Io
 import Quickshell.Wayland
@@ -216,14 +217,14 @@ PanelWindow {
             anchors.centerIn: cardArea
             width: cardArea.width + 26 * root.s
             height: cardArea.height + 26 * root.s
-            radius: 24 * root.s
+            radius: 29 * root.s
             color: Theme.alpha(WeatherData.elementColor, 0.05)
         }
         Rectangle {
             anchors.centerIn: cardArea
             width: cardArea.width + 13 * root.s
             height: cardArea.height + 13 * root.s
-            radius: 20 * root.s
+            radius: 22.5 * root.s
             color: Theme.alpha(WeatherData.elementColor, 0.12)
         }
 
@@ -243,10 +244,11 @@ PanelWindow {
             }
 
             // live weather scene — fills the WHOLE card (clipped + masked)
-            Item {
+            ClippingRectangle {
                 id: sceneClip
                 anchors.fill: parent
-                clip: true
+                radius: 16 * root.s
+                color: "transparent"
 
                 SceneLayer {
                     anchors.fill: parent
@@ -265,31 +267,6 @@ PanelWindow {
                 }
             }
 
-            // corner masks — make the scene respect the rounded corners
-            Image {
-                x: 0; y: 0
-                width: 16 * root.s; height: 16 * root.s
-                source: "assets/sprites/corner.png"
-                rotation: 90
-            }
-            Image {
-                anchors.right: parent.right; y: 0
-                width: 16 * root.s; height: 16 * root.s
-                source: "assets/sprites/corner.png"
-                rotation: 180
-            }
-            Image {
-                anchors.bottom: parent.bottom; x: 0
-                width: 16 * root.s; height: 16 * root.s
-                source: "assets/sprites/corner.png"
-                rotation: 270
-            }
-            Image {
-                anchors.right: parent.right
-                anchors.bottom: parent.bottom
-                width: 16 * root.s; height: 16 * root.s
-                source: "assets/sprites/corner.png"
-            }
 
             // city picker overlay (above the content, below the borders)
             CitySearch {
@@ -348,15 +325,6 @@ PanelWindow {
                         width: parent.width
                         height: root.headerH
 
-                        // small scrim so the city row reads over bright skies
-                        Rectangle {
-                            anchors { top: parent.top; left: parent.left; right: parent.right }
-                            height: 36 * root.s
-                            gradient: Gradient {
-                                GradientStop { position: 0.0; color: Theme.alpha(Theme.bgDeep, 0.40) }
-                                GradientStop { position: 1.0; color: Theme.alpha(Theme.bgDeep, 0.0) }
-                            }
-                        }
 
                         // city · updated · stale
                         Item {
