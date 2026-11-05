@@ -11,3 +11,4 @@ __pycache__/
 # System and temporary files
 .DS_Store
 *.tmp
+dist/
