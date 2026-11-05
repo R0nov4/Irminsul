@@ -34,6 +34,8 @@ chk /usr/lib/genshin-daynight/pick.sh
 chk /etc/genshin-daynight.conf
 echo "== running =="
 { pgrep -x waybar.orig >/dev/null || pgrep -x waybar >/dev/null; } && ok waybar || bad "waybar not running"
+command -v qs >/dev/null 2>&1 && ok quickshell || bad "quickshell not installed (needed by the weather popup)"
+systemctl --user is-enabled teyvat-forecast-fetch.timer >/dev/null 2>&1 && ok forecast-timer || bad "weather refresh timer not enabled"
 pgrep -x dunst >/dev/null && ok dunst || bad "dunst not running"
 echo; if [ "$fails" = 0 ]; then echo "ALL GOOD"; else echo "$fails problem(s)"; fi
 exit "$fails"

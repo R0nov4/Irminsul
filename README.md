@@ -4,7 +4,7 @@
 <img src="reference/banner.png" alt="Irminsul" width="100%">
 
 <a href="https://github.com/R0nov4/irminsul">
-  <img src="https://readme-typing-svg.demolab.com?font=Cinzel&weight=600&size=21&duration=3200&pause=900&color=F5C542&center=true&vCenter=true&width=760&lines=Boot+%C2%B7+Login+%C2%B7+Bar+%C2%B7+Launcher+%C2%B7+Lock+%C2%B7+Power;Wi-Fi+%C2%B7+Bluetooth+%C2%B7+Sound+%C2%B7+Battery+%C2%B7+Polkit;Icons+%C2%B7+File+Chooser+%C2%B7+Screenshots+%C2%B7+Terminal;17+modules.+One+installer.+Zero+frameworks." alt="Irminsul features">
+  <img src="https://readme-typing-svg.demolab.com?font=Cinzel&weight=600&size=21&duration=3200&pause=900&color=F5C542&center=true&vCenter=true&width=760&lines=Boot+%C2%B7+Login+%C2%B7+Bar+%C2%B7+Launcher+%C2%B7+Lock+%C2%B7+Power;Wi-Fi+%C2%B7+Bluetooth+%C2%B7+Sound+%C2%B7+Battery+%C2%B7+Polkit;Icons+%C2%B7+File+Chooser+%C2%B7+Screenshots+%C2%B7+Terminal;18+modules.+One+installer.+Zero+frameworks." alt="Irminsul features">
 </a>
 
 <br><br>
@@ -15,8 +15,8 @@
 ![GTK3](https://img.shields.io/badge/GTK3-7FE719?style=for-the-badge&logo=gtk&logoColor=black)
 ![Python](https://img.shields.io/badge/Python-3776AB?style=for-the-badge&logo=python&logoColor=white)
 <br>
-![Version](https://img.shields.io/badge/version-1.0.2-f5c542?style=for-the-badge&labelColor=1a1a2e)
-![Modules](https://img.shields.io/badge/modules-17-ff9d5c?style=for-the-badge&labelColor=1a1a2e)
+![Version](https://img.shields.io/badge/version-1.1.0-f5c542?style=for-the-badge&labelColor=1a1a2e)
+![Modules](https://img.shields.io/badge/modules-18-ff9d5c?style=for-the-badge&labelColor=1a1a2e)
 ![Stars](https://img.shields.io/github/stars/R0nov4/irminsul?style=for-the-badge&color=f5c542&labelColor=1a1a2e)
 ![Last commit](https://img.shields.io/github/last-commit/R0nov4/irminsul?style=for-the-badge&color=9b7dff&labelColor=1a1a2e)
 
@@ -27,7 +27,8 @@
 [**🧩 Modules**](#modules) &nbsp;·&nbsp;
 [**🚀 Install**](#installation) &nbsp;·&nbsp;
 [**⌨️ Keybindings**](#keybindings) &nbsp;·&nbsp;
-[**🛠 Maintenance**](#maintenance)
+[**🛠 Maintenance**](#maintenance) &nbsp;·&nbsp;
+[**📜 Changelog**](#changelog)
 
 </div>
 
@@ -41,7 +42,7 @@
 
 | 🧩 | 🌅 | 🌐 | 🎧 | 📸 | 🪄 |
 |:-:|:-:|:-:|:-:|:-:|:-:|
-| **17**<br><sub>modules</sub> | **4**<br><sub>time-of-day phases</sub> | **7**<br><sub>elemental workspaces</sub> | **85+**<br><sub>Traveler cards</sub> | **eng + fas**<br><sub>OCR</sub> | **1**<br><sub>installer</sub> |
+| **18**<br><sub>modules</sub> | **4**<br><sub>time-of-day phases</sub> | **7**<br><sub>elemental workspaces</sub> | **85+**<br><sub>Traveler cards</sub> | **eng + fas**<br><sub>OCR</sub> | **1**<br><sub>installer</sub> |
 
 </div>
 
@@ -59,7 +60,7 @@ flowchart LR
     A["🔌 Power on"] --> B["🌅 Plymouth loading screen<br/>hardware clock → Day / Night"]
     B --> C["🏰 SDDM Celestia<br/>Dawn · Day · Dusk · Night"]
     C --> D["🌿 Hyprland<br/>standalone Lua core"]
-    D --> E["📊 Waybar · 🚀 Rofi · 🔔 Dunst<br/>📶 Wi-Fi · 🔵 Bluetooth · 🔊 Sound"]
+    D --> E["📊 Waybar · 🚀 Rofi · 🔔 Dunst<br/>📶 Wi-Fi · 🔵 Bluetooth · 🔊 Sound · 🌦️ Weather"]
     E --> F["🔒 Hyprlock"]
     F --> G["🧚 Quit Game?"]
 ```
@@ -170,6 +171,30 @@ Audio control with the weight of an in-game menu.
 
 <br>
 
+### 🌦️ Teyvat Forecast — the weather popup &nbsp;<sub>`new in v1.1`</sub>
+
+A native weather panel that feels like an in-game menu, drawn with Quickshell (QML).
+
+| Tab | What lives there |
+|:--|:--|
+| ☀️ **Today** | temperature, condition, feels-like, high / low, wind, humidity, pressure, UV index, visibility, precipitation, a sun arc and the moon phase |
+| 🕐 **Hourly** | the hours ahead |
+| 📅 **Week** | the week ahead |
+| 🍃 **Air** | air quality |
+
+- 🔥 The weather is shown as an **element** (Anemo, …) and the whole card glows in that element's colour
+- ⚡ Special conditions get Genshin **reaction** names — Overloaded, Electro-Charged, Frozen, Vaporize, Swirl
+- 🎞️ A **live animated weather scene** sits behind the temperature
+- 🧚 A Paimon tip banner comments on the weather
+- 🔎 Click the city name to **search for another city**
+- 🌦️ A matching weather capsule lives in the bar
+
+Open or close it with `teyvat-forecast toggle`. Position and monitor are set in `~/.config/teyvat-forecast/config.json`.
+
+*Quickshell · QML*
+
+<br>
+
 ### 🛡️ Polkit — the admin-password dialog
 
 A real Polkit authentication agent, not a skin. Whenever `pkexec`, a package-manager GUI, a disk mount or NetworkManager asks for admin rights, you get a full-screen dimmed Genshin dialog.
@@ -247,6 +272,7 @@ A capsule top bar that looks like the in-game HUD:
 - 🌙 **Resin · Mora · Ping** status capsules
 - 🌍 **World Level (`AR`)** — your uptime, levelled up
 - ☀️ **Day / Night** indicator and **mail** badge for your notification history
+- 🌦️ **Weather capsule** — the current temperature, one click from the full forecast
 - 📶 Celestia Wi-Fi · 🔵 Bluetooth · 🔊 Sound · 🔋 Battery — all themed
 - 🩹 **Auto-recovery** — `start.sh` brings the bar back, and calling it twice is harmless
 
@@ -268,7 +294,7 @@ A capsule top bar that looks like the in-game HUD:
 <a id="modules"></a>
 ## 🧩 Modules
 
-Seventeen independent modules — install all of them or pick only what you need.
+Eighteen independent modules — install all of them or pick only what you need.
 
 ### 🌐 Core
 
@@ -288,6 +314,7 @@ Seventeen independent modules — install all of them or pick only what you need
 | 📸 | **`osd`** | **Kamera** screenshot suite plus volume / brightness HUD |
 | 🔔 | **`notif`** | **Dunst** with elemental and Paimon medals |
 | 💻 | **`terminal`** | Kitty · Fastfetch Traveler cards · Zsh + Starship |
+| 🌦️ | **`forecast`** | **Teyvat Forecast** — Quickshell weather popup with Today / Hourly / Week / Air tabs |
 
 ### 📡 Connectivity & System
 
@@ -319,7 +346,7 @@ flowchart TB
         hypr --- wiring --- fonts --- cursor
     end
     subgraph SHELL["🪟 Shell"]
-        waybar --- rofi --- osd --- notif --- terminal
+        waybar --- rofi --- osd --- notif --- terminal --- forecast
     end
     subgraph CONN["📡 Connectivity & System"]
         bluetooth --- audio --- polkit --- celestia-icons
@@ -564,7 +591,7 @@ irminsul/
 ├── tools/                      ✦ tray doctor · Wi-Fi clean-up · Wi-Fi bar icon
 ├── shell/                      ✦ zshrc
 ├── reference/                  ✦ screenshots, package lists, old installers, system notes
-└── modules/                    ✦ 17 modules, each laid out like the target filesystem
+└── modules/                    ✦ 18 modules, each laid out like the target filesystem
     │
     ├── hypr/                   home/.config/hypr-genshin/ — Lua core (standalone/), Theme Builder,
     │                           wallpaper engine + wallpaper-hooks.d/, cursor guard, Ambience menu
@@ -572,13 +599,15 @@ irminsul/
     ├── fonts/                  Genshin-UI.ttf + fontconfig alias rules
     ├── cursor/                 Genshin-Official Xcursor theme, GTK 2/3/4, xsettingsd, uwsm env
     │
-    ├── waybar/                 waybar-genshin/ — config, styles, scripts/ (Wi-Fi, battery, mail, AR, ping),
+    ├── waybar/                 waybar-genshin/ — config, styles, scripts/ (Wi-Fi, battery, mail, AR, ping, weather),
     │                           assets/ (elements, bat/, bat-ios/, bluetooth/, wifi/)
     ├── rofi/                   rofi-genshin/ — launcher, clipboard, wallpaper gallery, shot menu
     ├── osd/                    osd-genshin/ — Kamera screenshot suite, volume / brightness HUD,
     │                           GenshinSwappy GTK3 theme
     ├── notif/                  dunst-genshin/ — dunstrc, elemental + Paimon medal icons
     ├── terminal/               kitty-genshin, fastfetch-genshin (avatars/ + cards/), Zsh bits
+    ├── forecast/               home/.config/quickshell/teyvat-forecast/ — Quickshell (QML) weather popup,
+    │                           components/ (moon phase, sun arc, AQI meter, city search…)
     │
     ├── bluetooth/              Teyvat Archive (teyvat_archive.py) + desktop entry + quick popup
     ├── audio/                  irminsul-volume · irminsul-settings · pavucontrol shim
@@ -593,6 +622,16 @@ irminsul/
 ```
 
 <sub>Inside a module, `home/` is copied into `$HOME` and `root/` into `/` (needs `--system` or `--boot`). `celestia-icons` ships its own installer instead.</sub>
+
+<br>
+
+---
+
+<a id="changelog"></a>
+## 📜 Changelog
+
+### v1.1.0
+- 🌦️ **Added weather** — the new `forecast` module: the **Teyvat Forecast** popup and a weather capsule in the bar.
 
 <br>
 

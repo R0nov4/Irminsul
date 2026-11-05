@@ -61,7 +61,7 @@ if [ "$DEPS" = 1 ]; then
     adwaita-icon-theme
     breeze-icons
     papirus-icon-theme
-    hyprsunset qt5ct qt6ct xdg-desktop-portal-gtk
+    hyprsunset qt5ct qt6ct xdg-desktop-portal-gtk quickshell
   )
   echo "== Installing Arch Linux dependencies (${#PKGS[@]} packages) =="
   for try in 1 2 3; do
