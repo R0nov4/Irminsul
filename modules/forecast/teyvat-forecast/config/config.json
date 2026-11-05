@@ -1,0 +1,22 @@
+{
+  "city": "",
+  "lat": null,
+  "lon": null,
+  "units": "metric",
+  "quality": "medium",
+  "refresh_minutes": 12,
+  "position": {
+    "anchor": "top_right",
+    "offset_x": 310,
+    "offset_y": 54
+  },
+  "monitor": "primary",
+  "scale": 1.0,
+  "font": "SDK_SC_Web",
+  "show_paimon": true,
+  "sound": {
+    "enabled": false,
+    "volume": 40,
+    "click": true
+  }
+}

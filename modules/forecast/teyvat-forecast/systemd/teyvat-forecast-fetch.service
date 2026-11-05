@@ -1,0 +1,13 @@
+[Unit]
+Description=Teyvat Forecast - weather data fetch (Open-Meteo, no key)
+Documentation=https://open-meteo.com/
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=%h/.local/bin/teyvat-forecast fetch
+TimeoutStartSec=60
+# Note: exit code 1 = network failure, old data kept and flagged stale.
+# We deliberately do NOT mask it as success, so `systemctl --user status`
+# shows you why data went stale.

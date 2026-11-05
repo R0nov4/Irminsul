@@ -1,0 +1,186 @@
+#!/usr/bin/env bash
+# =============================================================================
+# teyvat-forecast — control CLI for the Teyvat Forecast weather popup.
+#
+#   teyvat-forecast toggle            toggle the popup (used by Waybar on-click)
+#   teyvat-forecast show | hide       show / hide the popup
+#   teyvat-forecast fetch             refresh weather data now
+#   teyvat-forecast city [name]       open the city picker / set city by name
+#   teyvat-forecast city --here       set city from IP geolocation
+#   teyvat-forecast --preview <scene> write fake data: clear rain snow storm
+#                                     fog hot windy night
+#   teyvat-forecast --demo-stale      preview the STALE badge
+#   teyvat-forecast preview off       restore real data after a preview
+#   teyvat-forecast start | stop      start / stop the Quickshell shell
+#   teyvat-forecast status            data + shell + timer status
+#   teyvat-forecast timer on|off      enable/disable the refresh timer
+#   teyvat-forecast help
+# =============================================================================
+set -u
+
+QS_BIN="${QS_BIN:-$(command -v qs || command -v quickshell || true)}"
+CFG_NAME="teyvat-forecast"
+IPC_TARGET="teyvat"
+FETCH="${TEYVAT_FETCH:-$HOME/.config/teyvat-forecast/teyvat-fetch.py}"
+
+c_ok()   { printf '\033[32m%s\033[0m\n' "$*"; }
+c_bad()  { printf '\033[31m%s\033[0m\n' "$*"; }
+c_dim()  { printf '\033[2m%s\033[0m\n' "$*"; }
+
+ipc() {
+  [ -n "$QS_BIN" ] || return 1
+  "$QS_BIN" -c "$CFG_NAME" ipc call "$IPC_TARGET" "$@" 2>/dev/null
+}
+
+shell_running() { [ "$(ipc ping 2>/dev/null)" = "pong" ]; }
+
+start_shell() {
+  if [ -z "$QS_BIN" ]; then
+    c_bad "error: 'qs' (quickshell) binary not found — is Quickshell installed?"
+    return 1
+  fi
+  ( "$QS_BIN" -c "$CFG_NAME" >/dev/null 2>&1 & )
+  c_dim "starting quickshell config '$CFG_NAME' ..."
+}
+
+# toggle/show/hide with auto-start: if the shell is not running yet,
+# start it in the background, wait for IPC to come up, then send the call.
+ipc_with_start() {
+  local fn="$1"
+  if shell_running; then
+    ipc "$fn"
+    return $?
+  fi
+  start_shell || return 1
+  local i
+  for i in 1 2 3 4 5 6 7 8; do
+    sleep 0.4
+    if shell_running; then
+      [ "$fn" = "toggle" ] && { ipc show; return 0; }
+      ipc "$fn"
+      return $?
+    fi
+  done
+  c_bad "error: shell did not respond on IPC within 3s"
+  c_dim "try: qs -c $CFG_NAME   (run it in a terminal to see errors)"
+  return 1
+}
+
+do_fetch() {
+  command -v python3 >/dev/null 2>&1 || { c_bad "error: python3 not found"; return 1; }
+  [ -f "$FETCH" ] || { c_bad "error: $FETCH not found — re-run install.sh"; return 1; }
+  python3 "$FETCH" fetch "$@"
+}
+
+cmd_status() {
+  echo "== data =="
+  python3 "$FETCH" status 2>/dev/null || c_bad "fetch script missing: $FETCH"
+  echo
+  echo "== shell =="
+  if shell_running; then c_ok "quickshell '$CFG_NAME' running (IPC: pong)"; else
+    c_dim "quickshell '$CFG_NAME' not running (start with: teyvat-forecast start)"
+  fi
+  echo
+  echo "== timer =="
+  if command -v systemctl >/dev/null 2>&1; then
+    systemctl --user is-active teyvat-forecast-fetch.timer >/dev/null 2>&1 \
+      && c_ok "teyvat-forecast-fetch.timer active" \
+      || c_dim "teyvat-forecast-fetch.timer inactive (data refreshes only via Waybar self-heal)"
+  fi
+}
+
+cmd_city() {
+  command -v python3 >/dev/null 2>&1 || { c_bad "error: python3 not found"; return 1; }
+  [ -f "$FETCH" ] || { c_bad "error: $FETCH not found — re-run install.sh"; return 1; }
+  case "${1:-}" in
+    "") ipc_with_start search ;;
+    --here|--auto) python3 "$FETCH" locate && c_ok "city set from your IP" ;;
+    *)
+      local res line lat lon name
+      res="$(python3 "$FETCH" search "$*")" || { c_bad "city search failed (network?)"; return 1; }
+      line="$(printf '%s' "$res" | python3 -c '
+import json, sys
+r = json.load(sys.stdin).get("results") or []
+if r:
+    x = r[0]
+    print(x["lat"], x["lon"], x["name"] + "|" + x.get("admin1", "") + ", " + x.get("country", ""))
+')"
+      [ -n "$line" ] || { c_bad "no city found for: $*"; return 1; }
+      lat="${line%% *}"; line="${line#* }"
+      lon="${line%% *}"; line="${line#* }"
+      name="${line%%|*}"
+      python3 "$FETCH" set-city "$lat" "$lon" "$name" && c_ok "city set to: $line"
+      ;;
+  esac
+}
+
+usage() {
+  cat <<'EOF'
+teyvat-forecast — Genshin Impact styled weather popup for Waybar (Quickshell)
+
+usage:
+  teyvat-forecast toggle              toggle popup (what the Waybar module calls)
+  teyvat-forecast show | hide         show / hide the popup
+  teyvat-forecast fetch               refresh weather data now
+  teyvat-forecast city                open the popup with the city picker
+  teyvat-forecast city <name>         set the city by name (first match)
+  teyvat-forecast city --here         set the city from your IP
+  teyvat-forecast --preview <scene>   preview a scene (clear rain snow storm
+                                      fog hot windy night)
+  teyvat-forecast --demo-stale        preview the stale-data badge
+  teyvat-forecast preview off         restore real data after previewing
+  teyvat-forecast start               start the Quickshell shell (qs -c teyvat-forecast)
+  teyvat-forecast stop                stop the shell via IPC
+  teyvat-forecast status              data + shell + timer status
+  teyvat-forecast timer on|off        enable / disable the refresh timer
+  teyvat-forecast help                this help
+
+preview scenes also drive the element/reaction system, e.g.:
+  --preview storm  -> Electro element + Electro-Charged reaction + lightning
+  --preview hot    -> Pyro element + Vaporize reaction
+EOF
+}
+
+main() {
+  local cmd="${1:-help}"
+  case "$cmd" in
+    toggle)  ipc_with_start toggle ;;
+    show|open) ipc_with_start show ;;
+    hide|close) ipc hide 2>/dev/null || true ;;
+    fetch)   shift; do_fetch "$@" ;;
+    city)    shift; cmd_city "$@" ;;
+    --preview)
+      [ "${2:-}" = "" ] && { c_bad "usage: teyvat-forecast --preview <scene>"; exit 2; }
+      python3 "$FETCH" preview "$2" && c_ok "preview '$2' active — open the popup" \
+        && c_dim "undo with: teyvat-forecast preview off"
+      ;;
+    --demo-stale)
+      python3 "$FETCH" demo-stale && c_ok "stale demo active — open the popup"
+      ;;
+    preview)
+      case "${2:-}" in
+        off|restore) python3 "$FETCH" restore ;;
+        "") c_bad "usage: teyvat-forecast preview <scene>|off"; exit 2 ;;
+        *) python3 "$FETCH" preview "$2" ;;
+      esac
+      ;;
+    start)   start_shell ;;
+    stop)
+      if shell_running; then ipc quit && c_ok "shell stopped"
+      else c_dim "shell not running"; fi
+      ;;
+    status)  cmd_status ;;
+    timer)
+      shift
+      case "${1:-}" in
+        on)  systemctl --user enable --now teyvat-forecast-fetch.timer && c_ok "timer enabled" ;;
+        off) systemctl --user disable --now teyvat-forecast-fetch.timer && c_ok "timer disabled" ;;
+        *) c_bad "usage: teyvat-forecast timer on|off"; exit 2 ;;
+      esac
+      ;;
+    help|-h|--help|"") usage ;;
+    *) c_bad "unknown command '$cmd' (see: teyvat-forecast help)"; exit 2 ;;
+  esac
+}
+
+main "$@"

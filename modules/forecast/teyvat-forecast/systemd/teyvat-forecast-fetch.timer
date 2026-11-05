@@ -1,0 +1,11 @@
+[Unit]
+Description=Refresh Teyvat Forecast weather data every 12 minutes
+
+[Timer]
+OnBootSec=2min
+OnUnitActiveSec=12min
+AccuracySec=30s
+Unit=teyvat-forecast-fetch.service
+
+[Install]
+WantedBy=timers.target
