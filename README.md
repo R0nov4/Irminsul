@@ -15,7 +15,7 @@
 ![GTK3](https://img.shields.io/badge/GTK3-7FE719?style=for-the-badge&logo=gtk&logoColor=black)
 ![Python](https://img.shields.io/badge/Python-3776AB?style=for-the-badge&logo=python&logoColor=white)
 <br>
-![Version](https://img.shields.io/badge/version-1.1.0-f5c542?style=for-the-badge&labelColor=1a1a2e)
+![Version](https://img.shields.io/badge/version-1.1.1a-f5c542?style=for-the-badge&labelColor=1a1a2e)
 ![Modules](https://img.shields.io/badge/modules-18-ff9d5c?style=for-the-badge&labelColor=1a1a2e)
 ![Stars](https://img.shields.io/github/stars/R0nov4/irminsul?style=for-the-badge&color=f5c542&labelColor=1a1a2e)
 ![Last commit](https://img.shields.io/github/last-commit/R0nov4/irminsul?style=for-the-badge&color=9b7dff&labelColor=1a1a2e)
